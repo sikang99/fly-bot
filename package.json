@@ -1,12 +1,13 @@
 {
-  "name": "fly-brain",
+  "name": "ant-a2-walking-lab",
   "version": "1.0.0",
-  "description": "",
+  "description": "Browser-based Unitree A2 walking and controller laboratory",
   "main": "index.js",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",

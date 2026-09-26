@@ -1,0 +1,44 @@
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #0b1118; color: #e8eef3; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 900px; overflow: hidden; }
+#scene { width: 100vw; height: 100vh; display: block; }
+.topbar { position: fixed; inset: 0 0 auto 0; height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; background: linear-gradient(180deg, rgba(8,13,19,.96), rgba(8,13,19,.76)); border-bottom: 1px solid #293641; backdrop-filter: blur(14px); }
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand strong { font-size: 20px; letter-spacing: .08em; }
+.brand span, .muted { color: #91a2b1; font-size: 12px; }
+.status { border: 1px solid #66532a; color: #ffc75c; border-radius: 999px; padding: 7px 12px; font: 700 11px/1 ui-monospace, monospace; letter-spacing: .12em; }
+.status.ok { color: #65e5a5; border-color: #2f7353; }
+.status.fault, .fault { color: #ff786f; }
+.panel { position: fixed; top: 82px; left: 18px; width: 330px; max-height: calc(100vh - 100px); overflow: auto; padding: 18px; border: 1px solid #2c3945; border-radius: 15px; background: rgba(12,19,27,.91); box-shadow: 0 18px 70px rgba(0,0,0,.35); backdrop-filter: blur(16px); }
+h1 { margin: 0 0 4px; font-size: 20px; } h2 { margin: 20px 0 10px; color: #95a9b9; font-size: 11px; text-transform: uppercase; letter-spacing: .14em; }
+.modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+button { appearance: none; border: 1px solid #3a4b58; border-radius: 9px; padding: 9px 10px; background: #17222c; color: #dbe5ec; cursor: pointer; font-weight: 650; }
+button:hover { border-color: #658297; } button.active { color: #111820; background: #ffb341; border-color: #ffb341; }
+button.danger { color: #ff8d84; border-color: #7b3f3b; }
+button.demo { color: #ffd089; border-color: #8b632b; background: #2d2519; }
+#fastWalk { color: #8ff0bc; border-color: #347458; }
+.control { margin: 12px 0; }
+.control label { display: flex; justify-content: space-between; color: #aebdca; font-size: 12px; }
+input[type=range] { width: 100%; accent-color: #ffb341; }
+.panel > label { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; font-size: 12px; color: #aebdca; }
+.panel input[type=number], .panel select { width: 140px; padding: 6px; border: 1px solid #3a4b58; border-radius: 6px; background: #17222c; color: #e8eef3; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+#editStatus { color: #95a9b9; font-size: 11px; line-height: 1.5; }
+.telemetry { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.metric { padding: 10px; border-radius: 9px; background: #111a22; border: 1px solid #26333d; }
+.metric b { display: block; font: 650 17px/1.2 ui-monospace, monospace; }.metric span { color: #718493; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.row { display: flex; align-items: center; gap: 9px; margin-top: 12px; }.row button { flex: 1; }.row label { color: #aebdca; font-size: 12px; }
+.hint { color: #718493; font-size: 11px; line-height: 1.5; margin: 12px 0 0; }
+.avoid { color: #ff9b53; }
+.nav { color: #ffd166; }
+.complete { color: #65e5a5; }
+.vision-panel { position: fixed; top: 82px; right: 18px; width: 380px; padding: 10px; border: 1px solid #2c3945; border-radius: 14px; background: rgba(12,19,27,.91); box-shadow: 0 18px 70px rgba(0,0,0,.35); backdrop-filter: blur(16px); }
+.vision-panel header { display: flex; justify-content: space-between; padding: 2px 3px 9px; color: #b8c7d2; font: 700 11px/1 ui-monospace, monospace; letter-spacing: .11em; }
+.vision-panel header span { color: #65e5a5; }
+.view-frame { position: relative; height: 220px; overflow: hidden; border: 1px solid #334451; border-radius: 9px; background: #081019; }
+#robotView { display: block; width: 100%; height: 100%; cursor: grab; }
+.view-frame::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(101,229,165,.05), transparent 32%, transparent 70%, rgba(3,8,12,.45)); box-shadow: inset 0 0 35px rgba(0,0,0,.35); }
+.reticle { position: absolute; z-index: 2; left: 50%; top: 50%; display: block; background: rgba(101,229,165,.7); pointer-events: none; }
+.reticle.horizontal { width: 24px; height: 1px; transform: translate(-50%,-50%); }
+.reticle.vertical { width: 1px; height: 24px; transform: translate(-50%,-50%); }
+.view-hud { position: absolute; z-index: 3; inset: auto 9px 7px; display: flex; justify-content: space-between; color: #8ff0bc; font: 650 10px/1 ui-monospace, monospace; text-shadow: 0 1px 4px #000; }

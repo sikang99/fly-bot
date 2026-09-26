@@ -1,4 +1,17 @@
-# fly-brain
+# Ant A2 walking lab
+
+This fork adapts the browser MuJoCo environment into a baseline walking laboratory for the 12-DOF Unitree A2 quadruped.
+
+```bash
+npm ci
+npm run dev
+```
+
+Open [a2.html](a2.html). The application provides passive, standing and diagonal-trot modes, bounded velocity commands, live telemetry and automatic passive fallback on excessive body tilt or low base height. See [the A2 architecture](docs/A2_ARCHITECTURE.md) before connecting any physical hardware.
+
+The simulator uses Unitree's official A2 MJCF properties. The original connectome viewer and fly arena remain available as research references at `index.html` and `arena.html`; they are not part of the A2 controller path.
+
+## Original fly-brain research environment
 
 The complete wiring diagram of a male fruit fly's nervous system is now a file: 165,122
 neurons, 104 million synapses. This project runs that file as a spiking brain, inside a

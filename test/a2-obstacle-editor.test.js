@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { isTraversable } from '../src/a2/terrain.js';
+
+test('obstacle creation, resize and deletion preserve robot state and update the live worker', async () => {
+  let pose, error;
+  globalThis.postMessage = m => { if (m.type === 'pose') pose = m; if (m.type === 'editError') error = m; };
+  const sim = await import('../src/a2/a2.worker.js');
+  const send = data => globalThis.onmessage({ data });
+  await send({ type: 'init', xml: fs.readFileSync(new URL('../public/a2/a2.xml', import.meta.url), 'utf8'), terrain: 'rough' });
+  for (let i = 0; i < 1500; i++) sim.step();
+  sim.postPose();
+  const before = [...pose.base], count = pose.obstacles.length;
+  const obstacle = { x: 3, y: 3, halfX: 0.3, halfY: 0.4, halfZ: 0.01, kind: 'step' };
+  await send({ type: 'editObstacle', action: 'create', obstacle });
+  assert.equal(pose.obstacles.length, count + 1);
+  assert.deepEqual(pose.base, before);
+  assert.equal(pose.mode, 'stand');
+  const id = pose.obstacles.at(-1).id;
+  assert.equal(isTraversable(pose.obstacles.at(-1)), true);
+  await send({ type: 'editObstacle', action: 'resize', id, obstacle: { ...obstacle, halfX: 0.8, halfZ: 0.2 } });
+  assert.equal(pose.obstacles.at(-1).halfX, 0.8);
+  assert.equal(isTraversable(pose.obstacles.at(-1)), false);
+  await send({ type: 'editObstacle', action: 'resize', id, obstacle: { ...obstacle, halfX: -1 } });
+  assert.ok(error); assert.equal(pose.obstacles.at(-1).halfX, 0.8);
+  await send({ type: 'moveObstacle', id, x: 4, y: 4 });
+  assert.equal(pose.obstacles.at(-1).x, 4);
+  await send({ type: 'editObstacle', action: 'delete', id });
+  assert.equal(pose.obstacles.length, count);
+  await send({ type: 'reset' });
+  assert.equal(pose.obstacles.length, count);
+  for (let i = 0; i < 1500; i++) sim.step();
+  sim.postPose(); assert.equal(pose.fault, null);
+});

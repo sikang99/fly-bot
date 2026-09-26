@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Unitree A2 Walking Lab</title>
+  <link rel="icon" href="data:," />
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <header class="topbar">
+    <div class="brand"><strong>ANT · A2</strong><span>12-DOF WALKING LAB</span></div>
+    <div id="status" class="status">LOADING MODEL</div>
+  </header>
+  <aside id="visionPanel" class="vision-panel">
+    <header><strong>A2 CAMERA</strong><span id="viewMode">STANDBY</span></header>
+    <div class="view-frame">
+      <canvas id="robotView"></canvas>
+      <i class="reticle horizontal"></i><i class="reticle vertical"></i>
+      <div class="view-hud"><span>FOV 78°</span><span id="viewRange">LiDAR --</span></div>
+    </div>
+  </aside>
+  <aside class="panel">
+    <h1>Unitree A2 기본 보행</h1>
+    <div class="muted">공식 A2 물성 기반 MuJoCo 시뮬레이션</div>
+
+    <h2>Operation mode</h2>
+    <div class="modes">
+      <button data-mode="passive" class="danger">Passive</button>
+      <button data-mode="stand" class="active">Stand</button>
+      <button data-mode="walk">Walk</button>
+    </div>
+    <div class="row"><button id="demo" class="demo">▶ Obstacle avoidance demo</button><button id="fastWalk">▶ Stable cruise +X</button></div>
+    <div class="row"><button id="clearWaypoints">Clear waypoints</button><button id="resetObstacle">Reset obstacles</button></div>
+    <p><span style="color:#36c98f">■ 초록: 단차 높이 2cm 이하 · 통과</span><br><span style="color:#ef694e">■ 주홍: 2cm 초과 단차 / 상자 · 회피</span><br>단차·상자를 클릭하여 선택하고 드래그하여 이동합니다. 통과 기준은 시뮬레이터 전용입니다.</p>
+    <p class="hint">녹색 화살표와 A2 카메라 방향이 전방(+X) · vx &gt; 0 전진 · 바닥 클릭: 경로점 추가 · 몸체 중심이 경로점 위에 오면 도착</p>
+
+    <h2>장애물 편집</h2>
+    <label>생성 종류 <select id="obstacleKind"><option value="box">상자</option><option value="step">단차</option></select></label>
+    <label>가로 X (m) <input id="obstacleWidth" type="number" min="0.1" max="4" step="0.01" value="0.6" required></label>
+    <label>세로 Y (m) <input id="obstacleDepth" type="number" min="0.1" max="4" step="0.01" value="0.6" required></label>
+    <label>높이 (m) <input id="obstacleHeight" type="number" min="0.01" max="2" step="0.01" value="0.3" required></label>
+    <div class="row"><button id="createObstacle">새 장애물 생성</button><button id="resizeObstacle" disabled>선택 크기 적용</button></div>
+    <button id="deleteObstacle" class="danger" disabled>선택 장애물 삭제</button>
+    <p id="editStatus" aria-live="polite">화면에서 장애물을 선택하세요. 생성은 로봇에서 X/Y 각각 +2m 위치, 편집 시 Stand 정지. 최대 32개. 새로고침 시 초기화됩니다.</p>
+    <h2>Velocity command</h2>
+    <div class="control"><label>전진 속도 vx <b id="vxValue">0.00</b></label><input id="vx" type="range" min="-0.6" max="0.6" value="0" step="0.05"></div>
+    <div class="control"><label>측면 속도 vy <b id="vyValue">0.00</b></label><input id="vy" type="range" min="-0.35" max="0.35" value="0" step="0.05"></div>
+    <div class="control"><label>회전 속도 yaw <b id="yawValue">0.00</b></label><input id="yaw" type="range" min="-0.35" max="0.35" value="0" step="0.05"></div>
+    <div class="control"><label>보행 주파수 Hz (안정 고정) <b id="frequencyValue">1.4</b></label><input id="frequency" type="range" min="1.4" max="1.4" value="1.4" step="0.1" disabled></div>
+
+    <h2>Telemetry</h2>
+    <div class="telemetry">
+      <div class="metric"><b id="mode">PASSIVE</b><span>mode</span></div>
+      <div class="metric"><b id="time">0.0</b><span>sim seconds</span></div>
+      <div class="metric"><b id="height">0.620</b><span>base height m</span></div>
+      <div class="metric"><b id="distance">0.00</b><span>distance m</span></div>
+      <div class="metric"><b id="speedState">0.00 m/s</b><span>actual forward speed</span></div>
+      <div class="metric"><b id="assistState">0.00 m/s²</b><span>preview translation servo</span></div>
+      <div class="metric"><b id="attitude">0° / 0°</b><span>roll / pitch</span></div>
+      <div class="metric"><b id="trackingState">0.00m / 0.0°</b><span>lateral / yaw</span></div>
+      <div class="metric"><b id="positionState">0.00m / 0.00m</b><span>world x / y</span></div>
+      <div class="metric"><b id="fault">none</b><span>safety fault</span></div>
+      <div class="metric"><b id="avoidanceState">CLEAR</b><span>obstacle avoidance</span></div>
+      <div class="metric"><b id="waypointState">IDLE</b><span>waypoints · distance</span></div>
+      <div class="metric"><b id="rewardState">TOTAL 0</b><span>waypoint reward</span></div>
+      <div class="metric"><b id="obstacleState">NONE</b><span>selected obstacle</span></div>
+      <div class="metric"><b id="footprintState">1.12 × 0.84m</b><span>swept footprint / clearance</span></div>
+      <div class="metric"><b class="complete">4-DOF STOWED</b><span>single arm prototype</span></div>
+    </div>
+    <div class="row"><button id="reset">Reset simulation</button><label><input id="follow" type="checkbox" checked> follow</label><label><input id="avoidanceEnabled" type="checkbox" checked> avoid</label></div>
+    <p class="hint">W/S 전후 이동 · A/D 회전 · Space 즉시 Passive. 실제 A2에는 이 브라우저의 관절 토크를 직접 전송하지 않습니다.</p>
+  </aside>
+  <script type="module" src="/src/a2/app.js"></script>
+</body>
+</html>
