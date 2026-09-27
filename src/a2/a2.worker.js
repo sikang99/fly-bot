@@ -11,6 +11,7 @@ import { rearEscapeSafe, rearBufferDeparture } from './dynamic-safety.js';
 import { EncounterPlanner, ENCOUNTER } from './encounter.js';
 import { ArmWork, armAction } from './arm-work.js';
 const armWork = new ArmWork();
+let editingRoute = false;
 const encounterPlanner = new EncounterPlanner();
 import { ManualControl } from './manual.js';
 import { pedestrianState, stepPedestrian } from './pedestrian.js';
@@ -53,7 +54,22 @@ function randomActorValue() { randomSeed = (1664525 * randomSeed + 1013904223) >
 
 globalThis.onmessage = async ({ data: message }) => {
   if (message.type === 'init') await init(message);
+  else if (message.type === 'routeEditor') {
+    editingRoute = !!message.enabled;
+    armWork.cancel(); manualControl.enter(false); recovery = null;
+    requestedCommand = sanitizeCommand(); controller?.setCommand(requestedCommand);
+    controller?.setMode('stand'); servoWorldVelocity = null; encounterPlanner.reset();
+  }
+  else if (message.type === 'editRoute' && editingRoute) {
+    if (!Array.isArray(message.waypoints) || message.waypoints.some(w => !w.id || !Number.isFinite(w.x) || !Number.isFinite(w.y))) return;
+    const existing = new Map(waypoints.map(w => [w.id, w]));
+    waypoints = message.waypoints.map(w => ({ id: w.id, x: w.x, y: w.y, action: armAction(w.action),
+      arrivalRewarded: existing.get(w.id)?.arrivalRewarded, tracking: false, recovering: false,
+      bestDistance: Infinity, lastProgressAt: data?.time ?? 0 }));
+    alignmentAnchor = null; navigation = { active: false, remaining: waypoints.length, distance: Infinity, headingError: 0 };
+  }
   else if (message.type === 'mode') {
+    if (editingRoute && message.mode !== 'passive') return;
     if (armWork.task) armWork.cancel();
     if (message.mode !== 'walk') encounterPlanner.reset();
     if (manualControl.enabled) {
@@ -83,7 +99,7 @@ globalThis.onmessage = async ({ data: message }) => {
   else if (message.type === 'addWaypoint') {
     waypoints.push({ id: message.waypoint.id, action: armAction(message.waypoint.action), x: message.waypoint.x, y: message.waypoint.y, tracking: false,
       bestDistance: Infinity, lastProgressAt: data?.time ?? 0, recovering: false });
-    if (!manualControl.enabled && !armWork.task) controller?.setMode('walk');
+    if (!editingRoute && !manualControl.enabled && !armWork.task) controller?.setMode('walk');
   }
   else if (message.type === 'waypointAction') {
     const waypoint = waypoints.find(w => w.id === message.id);
@@ -188,7 +204,11 @@ function controlStep(dt) {
   locomotionStabilityScale = updateStabilityEnvelope(locomotionStabilityScale, measuredStability,
     VELOCITY_ASSIST_PROFILE.stabilityRecoveryRate, dt);
   controller.setMotionScale(locomotionStabilityScale);
-  if (manualControl.enabled) {
+  if (editingRoute) {
+    controller.setCommand({ vx: 0, vy: 0, yawRate: 0 }); servoWorldVelocity = null;
+    avoidance = { active: false, direction: 0, clearance: Infinity };
+    navigation = { active: false, remaining: waypoints.length, distance: Infinity, headingError: 0 };
+  } else if (manualControl.enabled) {
     const value = manualControl.sample(performance.now());
     // Passive naturally lowers the body; allow Stand to raise it again.
     // Walking faults and unsafe tilt still latch the emergency stop.
@@ -208,7 +228,7 @@ function controlStep(dt) {
       armWork.cancel(); controller.setMode('walk');
     }
   } else updateAvoidance(orientation.yaw, updateNavigation(orientation.yaw));
-  const target = controller.targets(dt);
+  const target = controller.targets(dt, orientation);
   applyPlanarVelocityAssist(orientation, dt);
   const torque = controller.torques(position, velocity, target);
   for (const name of JOINT_ORDER) data.ctrl[actuator[name]] = torque[name];

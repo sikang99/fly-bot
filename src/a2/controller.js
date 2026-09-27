@@ -21,10 +21,12 @@ export class A2WalkingController {
     this.phase = 0;
     this.fault = null;
     this.motionScale = 1;
+    this.standTrim = { pitch: 0, roll: 0 };
   }
 
   setMode(mode) {
     if (!['passive', 'stand', 'walk'].includes(mode)) throw new Error(`unknown A2 mode: ${mode}`);
+    if (mode !== this.mode) this.standTrim = { pitch: 0, roll: 0 };
     this.mode = mode;
     if (mode !== 'walk') this.command = { ...this.command, vx: 0, vy: 0, yawRate: 0 };
     if (mode === 'passive') this.phase = 0;
@@ -47,7 +49,7 @@ export class A2WalkingController {
     return !this.fault;
   }
 
-  targets(dt) {
+  targets(dt, attitude = { pitch: 0, roll: 0 }) {
     const blend = 1 - Math.exp(-dt / A2_GAIT_PROFILE.commandTimeConstant);
     for (const key of ['vx', 'vy', 'yawRate', 'frequency']) this.gaitCommand[key] += (this.command[key] - this.gaitCommand[key]) * blend;
     const gait = {
@@ -59,6 +61,19 @@ export class A2WalkingController {
     if (this.mode === 'walk') this.phase = (this.phase + Math.PI * 2 * gait.frequency * dt) % (Math.PI * 2);
     const motion = Math.max(Math.abs(gait.vx), Math.abs(gait.vy), Math.abs(gait.yawRate));
     const legTargets = {};
+    if (this.mode === 'stand') {
+      // Correct support-leg length using measured body attitude, not a visual
+      // quaternion override. Bounded integral offsets compensate static PD sag.
+      for (const axis of ['pitch', 'roll']) this.standTrim[axis] = clamp(
+        this.standTrim[axis] + clamp(attitude[axis] || 0, -.3, .3) * dt * .12, -.07, .07);
+      const pitch = clamp((attitude.pitch || 0) * .24 + this.standTrim.pitch, -.085, .085);
+      const roll = clamp((attitude.roll || 0) * .18 + this.standTrim.roll, -.05, .05);
+      for (const leg of Object.keys(PHASE_OFFSET)) {
+        const z = clamp(-.34 - (leg[0] === 'F' ? 1 : -1) * pitch
+          + (leg[1] === 'L' ? 1 : -1) * roll, -.43, -.25);
+        legTargets[leg] = legIk(0, z);
+      }
+    }
     if (this.mode === 'walk') for (const leg of Object.keys(PHASE_OFFSET)) {
       const p = (this.phase + PHASE_OFFSET[leg]) % (Math.PI * 2);
       const cycle = footCycle(p);
@@ -80,7 +95,7 @@ export class A2WalkingController {
       const sideSign = joint.leg[1] === 'L' ? 1 : -1;
       let value = joint.nominal;
 
-      if (joint.type === 'hip') value += 0.08 * gait.vy + 0.20 * sideSign * gait.yawRate;
+      if (joint.type === 'hip' && this.mode === 'walk') value += 0.08 * gait.vy + 0.20 * sideSign * gait.yawRate;
       if (joint.type === 'thigh') value = legTargets[joint.leg]?.thigh ?? value;
       if (joint.type === 'calf') value = legTargets[joint.leg]?.calf ?? value;
       targets[name] = clamp(value, joint.min + 0.04, joint.max - 0.04);

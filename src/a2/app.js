@@ -200,6 +200,38 @@ function partFor(name) {
 
 const worker = new Worker(new URL('./a2.worker.js', import.meta.url), { type: 'module' });
 let manualMode = false, manualStopped = false, lastManualSend = 0, hadGamepad = false;
+let editorMode = false, savedView = null;
+function fitEditor() {
+  const points = [{ x: lastPose?.base[0] || 0, y: lastPose?.base[1] || 0 }, ...waypoints, ...obstacleState.values()];
+  const xs = points.map(p => p.x), ys = points.map(p => p.y);
+  const x = (Math.min(...xs) + Math.max(...xs)) / 2, y = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const span = Math.max(5, Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+  controls.target.set(x, 0, -y); camera.position.set(x, Math.min(65, span * 2.4), -y + .001); controls.update();
+}
+function setEditor(enabled) {
+  if (enabled === editorMode || !ready) return;
+  if (enabled) savedView = { position: camera.position.clone(), target: controls.target.clone(), following };
+  editorMode = enabled; setManualMode(false);
+  worker.postMessage({ type: 'routeEditor', enabled });
+  for (const id of ['vx', 'vy', 'yaw']) $(`#${id}`).value = '0';
+  $('#driveTools').hidden = enabled; $('#driveDetails').hidden = enabled; $('#editorTools').hidden = !enabled;
+  document.body.classList.toggle('editing-route', enabled);
+  $('#editView').classList.toggle('active', enabled); $('#driveView').classList.toggle('active', !enabled);
+  controls.enableRotate = !enabled; controls.mouseButtons.LEFT = enabled ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+  following = enabled ? false : savedView?.following ?? true;
+  if (enabled) fitEditor();
+  else if (savedView) { camera.position.copy(savedView.position); controls.target.copy(savedView.target); controls.update(); }
+  rebuildWaypoints(); resize();
+}
+$('#editView').onclick = () => setEditor(true);
+$('#driveView').onclick = () => setEditor(false);
+$('#editorFit').onclick = fitEditor;
+$('#editorStop').onclick = () => emergencyStop();
+function syncEditedRoute() {
+  let start = { x: lastPose?.base[0] || 0, y: lastPose?.base[1] || 0 };
+  for (const w of waypoints.filter(w => !w.reached)) { w.segmentStart = start; start = { x: w.x, y: w.y }; }
+  worker.postMessage({ type: 'editRoute', waypoints: waypoints.filter(w => !w.reached) }); rebuildWaypoints();
+}
 let bodyNames = [], ready = false, lastPose = null, following = true, editorPending = false;
 
 worker.onmessage = ({ data }) => {
@@ -323,6 +355,7 @@ const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), groundHit = 
 let pointerDown = null, draggingObstacle = null, selectedObstacle = null, dragSurface = null;
 addEventListener('pointerdown', event => {
   if (event.target !== canvas && event.target !== robotViewCanvas) return;
+  if (!editorMode || event.button !== 0) return;
   const viewCamera = event.target === robotViewCanvas ? activeRobotCamera() : camera;
   setPointerRay(event.clientX, event.clientY, event.target, viewCamera);
   const hit = raycaster.intersectObjects([...obstacleMeshes.values()], false)[0];
@@ -369,6 +402,7 @@ function groundPointFromScreen(clientX, clientY, sourceCanvas = canvas, viewCame
 }
 
 function addWaypointFromScreen(clientX, clientY) {
+  if (!editorMode) return false;
   const point = groundPointFromScreen(clientX, clientY);
   if (!point) return false;
   const previous = waypoints.filter(waypoint => !waypoint.reached).at(-1);
@@ -458,6 +492,26 @@ function rebuildWaypoints() {
     select.value = waypoint.action || 'none'; select.disabled = waypoint.reached;
     select.onchange = () => { waypoint.action = select.value; worker.postMessage({ type: 'waypointAction', id: waypoint.id, action: waypoint.action }); rebuildWaypoints(); };
     label.append(select); $('#waypointActions').append(label);
+    if (editorMode && !waypoint.reached) {
+      const row = document.createElement('div'); row.className = 'waypoint-edit';
+      for (const axis of ['x', 'y']) {
+        const input = document.createElement('input'); input.type = 'number'; input.step = '.1'; input.value = waypoint[axis].toFixed(2);
+        input.setAttribute('aria-label', `경로점 ${index + 1} ${axis.toUpperCase()} 좌표`);
+        input.onchange = () => { const value = input.valueAsNumber; if (Number.isFinite(value)) { waypoint[axis] = value; syncEditedRoute(); } else input.value = waypoint[axis]; };
+        row.append(input);
+      }
+      for (const [title, offset] of [['앞 순서', -1], ['뒤 순서', 1], ['삭제', 0]]) {
+        const button = document.createElement('button'); button.textContent = title;
+        button.setAttribute('aria-label', `경로점 ${index + 1} ${title}`);
+        button.disabled = offset !== 0 && (!waypoints[index + offset] || waypoints[index + offset].reached);
+        button.onclick = () => {
+          if (!offset) waypoints.splice(index, 1);
+          else [waypoints[index], waypoints[index + offset]] = [waypoints[index + offset], waypoints[index]];
+          syncEditedRoute();
+        }; row.append(button);
+      }
+      $('#waypointActions').append(row);
+    }
     const color = waypoint.reached ? '#65e5a5' : waypoint.action && waypoint.action !== 'none' ? '#c994ff' : waypoint === current ? '#ffb341' : '#ffd166';
     const marker = new THREE.Group(); marker.position.set(waypoint.x, 0.012, -waypoint.y);
     const ring = new THREE.Mesh(new THREE.RingGeometry(WAYPOINT_RADIUS * 0.68, WAYPOINT_RADIUS, 32), new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }));
@@ -502,13 +556,14 @@ $('#manualArmWork').onclick = () => { keyState.clear(); pointerDirection = ''; w
 $('#manualArmHome').onclick = () => worker.postMessage({ type: 'manualArm', action: 'home' });
 addEventListener('keydown', event => {
   if (event.code === 'Space') { event.preventDefault(); emergencyStop(); return; }
+  if (editorMode) return;
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
   if (manualMode && event.code.startsWith('Arrow')) event.preventDefault();
   keyState.add(event.code);
   if (manualMode) return;
   updateKeys();
 });
-addEventListener('keyup', event => { keyState.delete(event.code); updateKeys(); });
+addEventListener('keyup', event => { keyState.delete(event.code); if (!editorMode) updateKeys(); });
 function updateKeys() {
   if (manualMode) return;
   $('#vx').value = keyState.has('KeyW') ? 0.6 : keyState.has('KeyS') ? -0.4 : 0;
@@ -522,6 +577,7 @@ function emergencyStop() {
   $('#manualStatus').textContent = '비상 정지 · Manual Mode 버튼을 다시 눌러 재활성화하세요.';
 }
 function setManualMode(enabled) {
+  $('#manualControls').open = enabled;
   manualMode = enabled; manualStopped = false; hadGamepad = false; keyState.clear(); pointerDirection = '';
   worker.postMessage({ type: 'manualMode', enabled });
   for (const id of ['demo', 'fastWalk', 'vx', 'vy', 'yaw']) $(`#${id}`).disabled = enabled;
