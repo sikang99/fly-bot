@@ -1,7 +1,24 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { ManualControl, gamepadCommand } from '../src/a2/manual.js';
+import { ManualControl, gamepadCommand, webManualCommand } from '../src/a2/manual.js';
+
+test('web arrows and hold buttons map body-relative movement and release to zero', () => {
+  for (const [key, direction, axis, value] of [
+    ['ArrowUp', 'front', 'vx', .6], ['ArrowDown', 'back', 'vx', -.6],
+    ['ArrowLeft', 'left', 'vy', .35], ['ArrowRight', 'right', 'vy', -.35],
+    ['KeyA', 'turnLeft', 'yawRate', .35], ['KeyD', 'turnRight', 'yawRate', -.35],
+  ]) {
+    const keyboard = webManualCommand(new Set([key, 'ShiftLeft']));
+    assert.equal(keyboard.held, true); assert.equal(keyboard.command[axis], value);
+    const pointer = webManualCommand(new Set(), direction);
+    assert.equal(pointer.held, true); assert.equal(pointer.command[axis], value);
+  }
+  assert.equal(webManualCommand(new Set(['ArrowUp'])).held, true);
+  assert.equal(webManualCommand(new Set(['KeyW'])).held, false);
+  assert.deepEqual(webManualCommand(new Set()), { held: false, command: { vx: 0, vy: 0, yawRate: 0 } });
+  assert.equal(webManualCommand(new Set(['ArrowUp', 'ArrowDown'])).command.vx, 0);
+});
 
 test('manual deadman, watchdog and latched emergency stop require explicit rearming', () => {
   const manual = new ManualControl(); manual.enter(true); manual.setMode('walk');
@@ -49,6 +66,17 @@ test('manual overrides a queued waypoint without reward and emergency cannot be 
   await send({ type: 'mode', mode: 'stand' });
   for (let i = 0; i < 1500; i++) sim.step();
   sim.postPose(); assert.equal(pose.mode, 'stand'); assert.ok(pose.base[2] > .25);
+  await send({ type: 'manualArm', action: 'left' });
+  sim.step(); sim.postPose(); assert.equal(pose.armWork.active, true); assert.equal(pose.command.vx, 0);
+  await send({ type: 'manualArm', action: 'home' });
+  sim.step(); sim.postPose(); assert.equal(pose.armWork.active, false);
+  await send({ type: 'manualArm', action: 'front' });
+  for (let i = 0; i < 4000; i++) sim.step();
+  sim.postPose(); assert.equal(pose.armWork.active, false); assert.equal(pose.mode, 'stand');
+  assert.equal(pose.reward.total, 0); assert.equal(pose.navigation.remaining, 1);
+  await send({ type: 'mode', mode: 'walk' });
+  await send({ type: 'manualArm', action: 'front' });
+  sim.step(); sim.postPose(); assert.equal(pose.armWork.active, false);
   for (const mode of ['passive', 'stand', 'walk', 'stand', 'passive', 'stand', 'walk']) {
     await send({ type: 'mode', mode }); sim.step(); sim.postPose(); assert.equal(pose.mode, mode);
   }

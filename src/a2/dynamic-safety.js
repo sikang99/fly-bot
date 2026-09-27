@@ -1,5 +1,33 @@
 import { isDynamic } from './dynamic.js';
-import { waypointRouteClear } from './avoidance.js';
+import { A2_FOOTPRINT, waypointRouteClear } from './avoidance.js';
+import { actorHeading } from './dynamic.js';
+import { isTraversable } from './terrain.js';
+
+// Only release the extra rear planning buffer, never the body/foot envelope.
+// Keep a fixed heading: this exception does not authorize turning or reversing.
+export function rearBufferDeparture(pose, target, obstacles) {
+  if (!target) return false;
+  const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+  if ((target.x - pose.x) * c + (target.y - pose.y) * s < .25) return false;
+  const end = { x: pose.x + c * .4, y: pose.y + s * .4 };
+  let released = false;
+  for (const o of obstacles) {
+    if (isTraversable(o)) continue;
+    if (isDynamic(o)) {
+      if (![0, .5, 1, 2].every(t => waypointRouteClear(pose, end,
+        [{ ...o, x: o.x + (o.vx || 0) * t, y: o.y + (o.vy || 0) * t }], pose.yaw))) return false;
+      continue;
+    }
+    if (waypointRouteClear(pose, end, [o], pose.yaw)) continue;
+    const forward = (o.x - pose.x) * c + (o.y - pose.y) * s;
+    const relative = pose.yaw - actorHeading(o);
+    const radius = Math.abs(Math.cos(relative)) * o.halfX + Math.abs(Math.sin(relative)) * o.halfY;
+    if (forward + radius >= -A2_FOOTPRINT.halfLength - .02
+      || !waypointRouteClear(pose, end, [o], pose.yaw, .02)) return false;
+    released = true;
+  }
+  return released;
+}
 
 export function rearEscapeSafe(pose, obstacles, forwardSpeed = 0) {
   const c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);

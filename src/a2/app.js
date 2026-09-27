@@ -1,11 +1,12 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ARM_STOW_POSE } from './config.js';
+import { ARM_ACTIONS, armWorkPose } from './arm-work.js';
 import { A2_FOOTPRINT } from './avoidance.js';
 import { WAYPOINT_RADIUS } from './navigation.js';
 import { worldObstacles, isTraversable, terrainColor } from './terrain.js';
 import { actorShape, actorHeading } from './dynamic.js';
-import { gamepadCommand } from './manual.js';
+import { gamepadCommand, webManualCommand } from './manual.js';
 import { buildJetsonBox, buildBodyBranding, renderBeacon, EquipmentBeacon } from './equipment.js';
 import './style.css';
 
@@ -133,6 +134,7 @@ const waypointGroup = new THREE.Group(); scene.add(waypointGroup);
 const waypointLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineDashedMaterial({ color: '#ffd166', dashSize: 0.12, gapSize: 0.06, transparent: true, opacity: 0.9 }));
 scene.add(waypointLine);
 const waypoints = [];
+let waypointSerial = 0;
 const bodyGroups = new Map();
 const dark = new THREE.MeshStandardMaterial({ color: '#222b32', roughness: 0.48, metalness: 0.42 });
 const shell = new THREE.MeshStandardMaterial({ color: '#cad5dd', roughness: 0.32, metalness: 0.28 });
@@ -154,13 +156,21 @@ function buildRobotArm() {
   const elbowJoint = new THREE.Mesh(new THREE.CylinderGeometry(0.066, 0.066, 0.15, 20), accent); elbow.add(elbowJoint);
   const forearm = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.09, 0.30), dark); forearm.position.z = 0.15; elbow.add(forearm);
 
-  const wrist = new THREE.Group(); wrist.name = 'arm_wrist'; wrist.position.z = 0.30; wrist.rotation.y = ARM_STOW_POSE.wristPitch; elbow.add(wrist);
+  // PiPER-X-inspired six-axis visual chain, not calibrated manufacturer kinematics.
+  // J1 base yaw, J2 shoulder, J3 elbow, J4 forearm roll, J5 wrist pitch, J6 tool roll.
+  const forearmRoll = new THREE.Group(); forearmRoll.name = 'arm_forearm_roll'; forearmRoll.position.z = 0.30; elbow.add(forearmRoll);
+  const rollHousing = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.058, 0.09, 20), shell);
+  rollHousing.rotation.x = Math.PI / 2; forearmRoll.add(rollHousing);
+  const wrist = new THREE.Group(); wrist.name = 'arm_wrist'; wrist.rotation.y = ARM_STOW_POSE.wristPitch; forearmRoll.add(wrist);
   const wristJoint = new THREE.Mesh(new THREE.SphereGeometry(0.065, 20, 14), accent); wrist.add(wristJoint);
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.16, 0.09), shell); palm.position.z = 0.09; wrist.add(palm);
+  const toolRoll = new THREE.Group(); toolRoll.name = 'arm_tool_roll'; wrist.add(toolRoll);
+  const toolFlange = new THREE.Mesh(new THREE.CylinderGeometry(0.052, 0.052, 0.04, 20), dark);
+  toolFlange.rotation.x = Math.PI / 2; toolFlange.position.z = 0.045; toolRoll.add(toolFlange);
+  const palm = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.16, 0.09), shell); palm.position.z = 0.09; toolRoll.add(palm);
   for (const side of [-1, 1]) {
     const finger = new THREE.Mesh(new THREE.BoxGeometry(0.035, 0.035, 0.17), dark);
     finger.name = side < 0 ? 'gripper_left' : 'gripper_right';
-    finger.position.set(0, side * ARM_STOW_POSE.gripperGap, 0.20); finger.rotation.x = side * 0.08; wrist.add(finger);
+    finger.position.set(0, side * ARM_STOW_POSE.gripperGap, 0.20); finger.rotation.x = side * 0.08; toolRoll.add(finger);
   }
   arm.traverse(object => { if (object.isMesh) { object.castShadow = true; object.receiveShadow = true; } });
   return arm;
@@ -206,6 +216,14 @@ worker.onmessage = ({ data }) => {
     ready = true; $('#status').textContent = 'READY'; $('#status').className = 'ok'; worker.postMessage({ type: 'run' });
   } else if (data.type === 'pose') {
     lastPose = data;
+    const armPose = data.armWork?.pose || armWorkPose();
+    const arm = bodyGroups.get('base_link')?.getObjectByName('single_arm');
+    if (arm) {
+      arm.rotation.z = armPose.yaw;
+      arm.getObjectByName('arm_shoulder').rotation.y = armPose.shoulder;
+      arm.getObjectByName('arm_elbow').rotation.y = armPose.elbow;
+      arm.getObjectByName('arm_wrist').rotation.y = armPose.wrist;
+    }
     equipmentBeacon.receive(data, performance.now() / 1000);
     syncObstacles(data.obstacles || []);
     for (const obstacle of data.obstacles || []) {
@@ -237,9 +255,12 @@ worker.onmessage = ({ data }) => {
   } else if (data.type === 'editError') {
     equipmentBeacon.event('장애물 편집 거부', performance.now() / 1000);
     $('#editStatus').textContent = data.message;
+  } else if (data.type === 'waypoint' && data.event === 'work-start') {
+    equipmentBeacon.event('경로점 팔 작업', performance.now() / 1000);
+    rebuildWaypoints();
   } else if (data.type === 'waypoint' && data.event === 'reached') {
     equipmentBeacon.event('경로점 도착', performance.now() / 1000);
-    const reached = waypoints.find(waypoint => !waypoint.reached
+    const reached = waypoints.find(waypoint => data.waypoint.id && waypoint.id === data.waypoint.id) || waypoints.find(waypoint => !waypoint.reached
       && Math.hypot(waypoint.x - data.waypoint.x, waypoint.y - data.waypoint.y) < 0.01)
       || waypoints.find(waypoint => !waypoint.reached);
     if (reached) { reached.reached = true; reached.reward = data.reward || 0; }
@@ -353,7 +374,7 @@ function addWaypointFromScreen(clientX, clientY) {
   const previous = waypoints.filter(waypoint => !waypoint.reached).at(-1);
   const segmentStart = previous ? { x: previous.x, y: previous.y }
     : { x: lastPose?.base[0] ?? 0, y: lastPose?.base[1] ?? 0 };
-  const waypoint = { x: point.x, y: -point.z, reached: false, segmentStart };
+  const waypoint = { id: `waypoint_${++waypointSerial}`, action: $('#waypointAction').value, x: point.x, y: -point.z, reached: false, segmentStart };
   waypoints.push(waypoint); rebuildWaypoints();
   worker.postMessage({ type: 'addWaypoint', waypoint });
   return true;
@@ -427,9 +448,17 @@ function archiveWaypoints(cancelNavigation = true) {
 
 function rebuildWaypoints() {
   waypointGroup.clear();
+  $('#waypointActions').replaceChildren();
   const current = waypoints.find(waypoint => !waypoint.reached);
-  waypoints.forEach(waypoint => {
-    const color = waypoint.reached ? '#65e5a5' : waypoint === current ? '#ffb341' : '#ffd166';
+  waypoints.forEach((waypoint, index) => {
+    const label = document.createElement('label');
+    label.textContent = `${index + 1}. (${waypoint.x.toFixed(1)}, ${waypoint.y.toFixed(1)})${waypoint.reached ? ' 완료' : ''} `;
+    const select = document.createElement('select'); select.dataset.waypointId = waypoint.id;
+    for (const [value, text] of Object.entries(ARM_ACTIONS)) select.add(new Option(text, value));
+    select.value = waypoint.action || 'none'; select.disabled = waypoint.reached;
+    select.onchange = () => { waypoint.action = select.value; worker.postMessage({ type: 'waypointAction', id: waypoint.id, action: waypoint.action }); rebuildWaypoints(); };
+    label.append(select); $('#waypointActions').append(label);
+    const color = waypoint.reached ? '#65e5a5' : waypoint.action && waypoint.action !== 'none' ? '#c994ff' : waypoint === current ? '#ffb341' : '#ffd166';
     const marker = new THREE.Group(); marker.position.set(waypoint.x, 0.012, -waypoint.y);
     const ring = new THREE.Mesh(new THREE.RingGeometry(WAYPOINT_RADIUS * 0.68, WAYPOINT_RADIUS, 32), new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide }));
     ring.rotation.x = -Math.PI / 2; marker.add(ring);
@@ -459,9 +488,22 @@ function updateFootprint(base, bodyYaw) {
 }
 
 const keyState = new Set();
+let pointerDirection = '';
+for (const button of document.querySelectorAll('[data-drive]')) {
+  button.style.touchAction = 'none';
+  button.onpointerdown = event => {
+    if (event.button !== 0 || !manualMode || manualStopped) return;
+    event.preventDefault(); button.setPointerCapture(event.pointerId); pointerDirection = button.dataset.drive;
+  };
+  const release = () => { pointerDirection = ''; worker.postMessage({ type: 'manualCommand', held: false, command: {} }); };
+  button.onpointerup = release; button.onpointercancel = release; button.onlostpointercapture = release;
+}
+$('#manualArmWork').onclick = () => { keyState.clear(); pointerDirection = ''; worker.postMessage({ type: 'manualArm', action: $('#manualArmAction').value }); };
+$('#manualArmHome').onclick = () => worker.postMessage({ type: 'manualArm', action: 'home' });
 addEventListener('keydown', event => {
   if (event.code === 'Space') { event.preventDefault(); emergencyStop(); return; }
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
+  if (manualMode && event.code.startsWith('Arrow')) event.preventDefault();
   keyState.add(event.code);
   if (manualMode) return;
   updateKeys();
@@ -476,11 +518,11 @@ function updateKeys() {
 
 function emergencyStop() {
   equipmentBeacon.event('긴급 정지', performance.now() / 1000);
-  manualStopped = true; keyState.clear(); worker.postMessage({ type: 'emergencyStop' });
+  manualStopped = true; keyState.clear(); pointerDirection = ''; worker.postMessage({ type: 'emergencyStop' });
   $('#manualStatus').textContent = '비상 정지 · Manual Mode 버튼을 다시 눌러 재활성화하세요.';
 }
 function setManualMode(enabled) {
-  manualMode = enabled; manualStopped = false; hadGamepad = false; keyState.clear();
+  manualMode = enabled; manualStopped = false; hadGamepad = false; keyState.clear(); pointerDirection = '';
   worker.postMessage({ type: 'manualMode', enabled });
   for (const id of ['demo', 'fastWalk', 'vx', 'vy', 'yaw']) $(`#${id}`).disabled = enabled;
   for (const button of document.querySelectorAll('[data-mode]')) button.disabled = false;
@@ -502,22 +544,28 @@ function pollManual() {
   if (hadGamepad && !pad) { emergencyStop(); return; }
   hadGamepad = !!pad;
   let input;
-  if (pad) {
+  const webInput = webManualCommand(keyState, pointerDirection);
+  if (pad && !webInput.held) {
     if (pad.mapping !== 'standard') { $('#manualStatus').textContent = '비표준 조종기: 매핑 설정 필요 · 키보드 사용 시 조종기를 분리하세요.'; worker.postMessage({ type: 'manualCommand', held: false, command: {} }); return; }
     input = gamepadCommand(pad);
     $('#manualStatus').textContent = `${pad.id} · Walk 선택 후 RB를 놓았다 누르고 조종`;
   } else {
-    input = { held: keyState.has('ShiftLeft') || keyState.has('ShiftRight'), command: {
-      vx: (Number(keyState.has('KeyW')) - Number(keyState.has('KeyS'))) * .6,
-      vy: (Number(keyState.has('KeyQ')) - Number(keyState.has('KeyE'))) * .35,
-      yawRate: (Number(keyState.has('KeyA')) - Number(keyState.has('KeyD'))) * .35 } };
-    $('#manualStatus').textContent = 'Walk 선택 후 Shift를 놓았다 누르고 W/S 전후, A/D 회전, Q/E 옆걸음';
+    input = webInput;
+    $('#manualStatus').textContent = 'Walk: 버튼/화살표를 누르면 이동, 놓으면 정지 · Shift+W/S 전후, A/D 회전, Q/E 옆걸음';
   }
   if (input.emergency) { emergencyStop(); return; }
   worker.postMessage({ type: 'manualCommand', ...input });
 }
 
 function renderTelemetry(data) {
+  const work = data.armWork;
+  for (const button of document.querySelectorAll('[data-drive]')) button.disabled = !manualMode || manualStopped || data.mode !== 'walk' || !!work?.active;
+  $('#manualArmWork').disabled = !manualMode || manualStopped || data.mode !== 'stand' || !!data.fault || !!work?.active;
+  $('#manualArmHome').disabled = !manualMode || manualStopped || !work?.active;
+  $('#armWorkState').textContent = work?.active ? `${ARM_ACTIONS[work.action]} · ${{ settling: '정착', extending: '뻗기', working: '작업', folding: '접기' }[work.stage]}` : '접힘';
+  for (const select of document.querySelectorAll('#waypointActions select')) {
+    select.disabled = waypoints.find(w => w.id === select.dataset.waypointId)?.reached || (work?.active && work.id === select.dataset.waypointId);
+  }
   const people = (data.obstacles || []).filter(o => o.kind === 'person');
   $('#pedestrianState').textContent = `양보 ${people.filter(o => o.yielding === 'sidestep').length} · 복귀 ${people.filter(o => o.yielding === 'returning').length} · 대기 ${people.filter(o => o.yielding === 'waiting').length}`;
   $('#perceptionHealth').textContent = data.perception?.health === 'ok' ? '가상 센서 입력 정상 · 위험 추적 10Hz'
@@ -549,7 +597,12 @@ function renderTelemetry(data) {
   $('#fault').className = data.fault ? 'fault' : '';
   const avoiding = data.avoidance?.active;
   $('#avoidanceState').textContent = avoiding
-    ? data.avoidance.strategy === 'dynamic-escape' ? '후방 접근 · 전진 탈출' : data.avoidance.strategy === 'dynamic-wait' ? '이동 장애물 대기' : data.avoidance.strategy?.startsWith('passage')
+    ? data.avoidance.strategy === 'rear-buffer-departure' ? '후방 여유 확보 · 저속 전진'
+      : data.avoidance.strategy === 'dynamic-dodge' ? `이동체 회피 · ${data.avoidance.direction > 0 ? '왼쪽' : '오른쪽'}`
+      : data.avoidance.strategy === 'dynamic-retreat' ? '이동체 회피 · 짧은 후퇴'
+      : data.avoidance.strategy === 'detour-blocked' ? '우회 경로 없음 · 정지'
+      : data.avoidance.strategy === 'detour' ? '밀집 장애물 우회'
+      : data.avoidance.strategy === 'dynamic-escape' ? '후방 접근 · 전진 탈출' : data.avoidance.strategy === 'dynamic-wait' ? (data.avoidance.blocked ? '이동체 · 안전 회피 경로 없음' : '이동 장애물 대기') : data.avoidance.strategy?.startsWith('passage')
       ? ({ passage: '통로 직진', 'passage-align': '통로 방향 정렬', 'passage-retreat': '회전 공간 확보', 'passage-blocked': '통로 여유 부족 · 정지' })[data.avoidance.strategy]
       : `${data.avoidance.strategy === 'docking' ? 'DOCKING' : data.avoidance.strategy === 'bypass' ? 'BYPASS' : data.avoidance.strategy === 'arc' ? 'ARC' : 'SIDESTEP'} ${data.avoidance.direction > 0 ? 'LEFT' : 'RIGHT'}` : data.navigation.blocked ? 'GOAL BLOCKED' : 'CLEAR';
   $('#avoidanceState').className = avoiding ? 'avoid' : '';

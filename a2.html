@@ -10,6 +10,7 @@
   <canvas id="scene"></canvas>
   <header class="topbar">
     <div class="brand"><strong>ANT · A2</strong><span>12-DOF WALKING LAB</span></div>
+    <nav class="row"><button id="driveView" class="active">주행 화면</button><button id="editView">경로 편집기</button><button id="editorStop" class="danger">긴급 정지</button></nav>
     <div id="status" class="status">LOADING MODEL</div>
   </header>
   <aside id="visionPanel" class="vision-panel">
@@ -28,6 +29,7 @@
     <h1>Unitree A2 Pro 기본 보행</h1>
     <div class="muted">공식 A2 물성 기반 MuJoCo 시뮬레이션</div>
 
+    <section id="driveTools">
     <h2>Operation mode</h2>
     <div class="row"><button id="manualMode">Manual Mode / 재활성화</button><button id="automaticMode">Auto Mode</button></div>
     <button id="emergencyStop" class="danger">긴급 정지 (Space / B)</button>
@@ -38,12 +40,28 @@
       <button data-mode="stand" class="active">Stand</button>
       <button data-mode="walk">Walk</button>
     </div>
+    <label>팔 작업 방향 <select id="manualArmAction"><option value="front">앞으로 뻗기</option><option value="left">몸 왼쪽</option><option value="right">몸 오른쪽</option></select></label>
+    <div class="row"><button id="manualArmWork" disabled>팔 작업</button><button id="manualArmHome" disabled>팔 원위치</button></div>
+    <p class="hint">Manual + Stand에서 팔 작업 가능 · 원위치는 작업 취소 후 접힘 · 시각 모델 전용</p>
+    <div class="row"><button data-drive="front" disabled>↑ 전진</button><button data-drive="back" disabled>↓ 후진</button></div>
+    <div class="row"><button data-drive="left" disabled>← 왼쪽 옆걸음</button><button data-drive="right" disabled>→ 오른쪽 옆걸음</button></div>
+    <div class="row"><button data-drive="turnLeft" disabled>↶ 좌회전</button><button data-drive="turnRight" disabled>↷ 우회전</button></div>
+    <p class="hint">Manual → Walk 선택 후 버튼/화살표를 누르는 동안 이동. ↑↓ 전후, ←→ 옆걸음. Shift+A/D 회전. 놓으면 정지하며 자동 회피는 하지 않습니다.</p>
     <div class="row"><button id="demo" class="demo">▶ Obstacle avoidance demo</button><button id="fastWalk">▶ 직선 순항 1m/s</button></div>
-    <div class="row"><button id="clearWaypoints">Clear waypoints</button><button id="resetObstacle">Reset obstacles</button></div>
+    </section>
+    <section id="editorTools" hidden>
+    <h2>경로 편집기</h2>
+    <p class="hint">편집 중 로봇은 Stand로 정지합니다. 바닥 클릭: 경로점 추가 · 드래그: 지도 이동 · 휠: 확대. 장애물은 드래그로 이동합니다. 변경은 즉시 반영되며 주행 화면으로 돌아가 Walk로 시작하세요. 새로고침 시 초기화됩니다.</p>
+    <button id="editorFit">경로 전체 보기</button>
+    <div class="row"><button id="clearWaypoints">경로 전체 지우기</button><button id="resetObstacle">장애물 초기 위치</button></div>
+    <h2>경로점 작업</h2>
+    <label>새 경로점 동작 <select id="waypointAction"><option value="none">이동만</option><option value="front">팔 앞으로 뻗기</option><option value="left">팔 몸 왼쪽으로 뻗기</option><option value="right">팔 몸 오른쪽으로 뻗기</option></select></label>
+    <p class="hint">동작 선택 후 바닥 클릭. 아래 목록에서 대기 경로점의 작업을 변경할 수 있습니다. 도착 → 정지 → 뻗기 → 2초 유지 → 접기 → 다음 지점. 방향은 도착한 로봇 몸 기준입니다. 팔은 시각 시뮬레이션이며 접촉·파지·팔 충돌 검사는 아직 없습니다.</p>
+    <div id="waypointActions"></div>
     <p><span style="color:#36c98f">■ 초록: 단차 높이 2cm 이하 · 통과</span><br><span style="color:#ef694e">■ 주홍: 2cm 초과 단차 / 상자 · 회피</span><br>단차·상자를 클릭하여 선택하고 드래그하여 이동합니다. 통과 기준은 시뮬레이터 전용입니다.</p>
     <p class="hint">녹색 화살표와 A2 카메라 방향이 전방(+X) · vx &gt; 0 전진 · 바닥 클릭: 경로점 추가 · 몸체 중심이 경로점 위에 오면 도착</p>
 
-    <h2>장애물 편집</h2>
+    <details><summary>장애물 편집</summary>
     <label><input id="personYield" type="checkbox" checked> 사람이 로봇을 만나면 살짝 양보</label>
     <p id="pedestrianState" class="hint">양보 0 · 복귀 0 · 대기 0</p>
     <p class="hint">사람은 옆으로 비킨 뒤 원래 경로로 복귀합니다. 공간이 없으면 기다립니다. 해제하면 기존 직진 장애물로 시험합니다. 실제 사람의 양보를 보장하지 않습니다.</p>
@@ -56,6 +74,10 @@
     <div class="row"><button id="createObstacle">새 장애물 생성</button><button id="resizeObstacle" disabled>선택 크기 적용</button></div>
     <button id="deleteObstacle" class="danger" disabled>선택 장애물 삭제</button>
     <p id="editStatus" aria-live="polite">화면에서 장애물을 선택하세요. 생성은 로봇에서 X/Y 각각 +2m 위치, 편집 시 Stand 정지. 최대 32개. 새로고침 시 초기화됩니다.</p>
+    </details>
+    </section>
+    <section id="driveDetails">
+    <details><summary>고급 주행 설정</summary>
     <h2>Velocity command</h2>
     <p class="hint">관절 보행 명령 상한은 0.6 유지 · 열린 직선 구간에서는 위치 보조로 실측 약 1m/s. 목표·장애물 2.5m 전부터 감속합니다. 실제 로봇 제어값이 아닙니다.</p>
     <div class="control"><label>전진 속도 vx <b id="vxValue">0.00</b></label><input id="vx" type="range" min="-0.6" max="0.6" value="0" step="0.05"></div>
@@ -65,6 +87,8 @@
 
     <label><input id="autoRecover" type="checkbox" checked>옆으로 넘어지면 자세 보조 복구 (시뮬레이션)</label>
     <p id="recoveryState" class="hint">실제 관절 자력 기상이 아닌 3초 자세 보조입니다. 주변 공간 확보 후 최대 2회 시도하며 Passive로 취소합니다.</p>
+    </details>
+    <details><summary>상세 상태 · Telemetry</summary>
     <h2>Telemetry</h2>
     <div class="telemetry">
       <div class="metric"><b id="mode">PASSIVE</b><span>mode</span></div>
@@ -82,13 +106,15 @@
       <div class="metric"><b id="rewardState">TOTAL 0</b><span>waypoint reward</span></div>
       <div class="metric"><b id="obstacleState">NONE</b><span>selected obstacle</span></div>
       <div class="metric"><b id="footprintState">1.12 × 0.84m</b><span>swept footprint / clearance</span></div>
-      <div class="metric"><b class="complete">4-DOF STOWED</b><span>single arm prototype</span></div>
+      <div class="metric"><b id="armWorkState" class="complete">접힘</b><span>AgileX PiPER-X · 6축 개략 모델</span></div>
       <div class="metric"><b>ORIN NX 16GB</b><span>rear-mounted Jetson · visual prototype</span></div>
       <div class="metric"><b id="beaconState">초기화 · 소등</b><span>적녹 경광등 · 오류 우선</span></div>
     </div>
     <p class="hint">후방 Jetson 박스·경광등: 이동 시 적녹 교대, 이벤트 시 적색 점멸(3초), 오류 시 적색 고정. 대기 시 소등. 박스 질량·충돌은 아직 물리에 반영되지 않습니다.</p>
+    </details>
     <div class="row"><button id="reset">Reset simulation</button><label><input id="follow" type="checkbox" checked> follow</label><label><input id="avoidanceEnabled" type="checkbox" checked> avoid</label></div>
     <p class="hint">W/S 전후 이동 · A/D 회전 · Space 즉시 Passive. 실제 A2에는 이 브라우저의 관절 토크를 직접 전송하지 않습니다.</p>
+    </section>
   </aside>
   <script type="module" src="/src/a2/app.js"></script>
 </body>

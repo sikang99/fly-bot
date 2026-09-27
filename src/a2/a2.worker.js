@@ -7,7 +7,11 @@ import { buildA2WorldXml } from './model.js';
 import { planPassage } from './passage.js';
 import { LocalDetour } from './detour.js';
 const localDetour = new LocalDetour();
-import { rearEscapeSafe } from './dynamic-safety.js';
+import { rearEscapeSafe, rearBufferDeparture } from './dynamic-safety.js';
+import { EncounterPlanner, ENCOUNTER } from './encounter.js';
+import { ArmWork, armAction } from './arm-work.js';
+const armWork = new ArmWork();
+const encounterPlanner = new EncounterPlanner();
 import { ManualControl } from './manual.js';
 import { pedestrianState, stepPedestrian } from './pedestrian.js';
 const pedestrians = new Map();
@@ -36,6 +40,7 @@ let alignmentAnchor = null;
 let cruiseHeading = null;
 let assistSpeedScale = 0.75;
 let filteredForwardSpeed = 0;
+let filteredLeftSpeed = 0;
 let forwardServoAcceleration = 0;
 let servoWorldVelocity = null;
 let servoForwardVelocity = 0, servoLeftVelocity = 0;
@@ -49,6 +54,8 @@ function randomActorValue() { randomSeed = (1664525 * randomSeed + 1013904223) >
 globalThis.onmessage = async ({ data: message }) => {
   if (message.type === 'init') await init(message);
   else if (message.type === 'mode') {
+    if (armWork.task) armWork.cancel();
+    if (message.mode !== 'walk') encounterPlanner.reset();
     if (manualControl.enabled) {
       manualControl.setMode(message.mode);
       controller?.setMode(manualControl.latched ? 'passive' : manualControl.mode);
@@ -56,21 +63,33 @@ globalThis.onmessage = async ({ data: message }) => {
     if (message.mode === 'passive') recovery = null;
   }
   else if (message.type === 'manualMode') {
+    armWork.cancel();
+    encounterPlanner.reset();
     manualControl.enter(!!message.enabled); recovery = null; alignmentAnchor = null; cruiseHeading = null;
     servoForwardVelocity = 0; servoLeftVelocity = 0; servoWorldVelocity = null;
     controller?.setMode('stand'); avoidance = { active: false, direction: 0, clearance: Infinity };
     for (const target of waypoints) { target.tracking = false; target.recovering = false; }
   }
+  else if (message.type === 'manualArm') {
+    if (!manualControl.enabled || manualControl.latched) return;
+    if (message.action === 'home') { armWork.cancel(); return; }
+    if (manualControl.mode !== 'stand' || controller?.fault || armWork.task || !data) return;
+    armWork.start({ id: '__manual_arm', action: message.action }, data.time);
+  }
   else if (message.type === 'manualCommand') manualControl.receive(message, performance.now());
-  else if (message.type === 'emergencyStop') { manualControl.stop(); recovery = null; controller?.setMode('passive'); servoWorldVelocity = null; }
+  else if (message.type === 'emergencyStop') { armWork.cancel(); manualControl.stop(); recovery = null; controller?.setMode('passive'); servoWorldVelocity = null; }
   else if (message.type === 'autoRecover') { autoRecover = !!message.enabled; if (!autoRecover) recovery = null; }
   else if (message.type === 'command') { requestedCommand = sanitizeCommand(message.command); avoidanceEnabled = message.avoidance !== false; controller?.setCommand(requestedCommand); }
   else if (message.type === 'addWaypoint') {
-    waypoints.push({ x: message.waypoint.x, y: message.waypoint.y, tracking: false,
+    waypoints.push({ id: message.waypoint.id, action: armAction(message.waypoint.action), x: message.waypoint.x, y: message.waypoint.y, tracking: false,
       bestDistance: Infinity, lastProgressAt: data?.time ?? 0, recovering: false });
-    if (!manualControl.enabled) controller?.setMode('walk');
+    if (!manualControl.enabled && !armWork.task) controller?.setMode('walk');
   }
-  else if (message.type === 'clearWaypoints') { waypoints = []; navigation = { active: false, remaining: 0, distance: Infinity, headingError: 0 }; reward = { total: 0, lastValue: 0, lastAt: -1e9 }; alignmentAnchor = null; controller?.setMode('stand'); }
+  else if (message.type === 'waypointAction') {
+    const waypoint = waypoints.find(w => w.id === message.id);
+    if (waypoint && armWork.task?.id !== message.id) waypoint.action = armAction(message.action);
+  }
+  else if (message.type === 'clearWaypoints') { armWork.cancel(); waypoints = []; navigation = { active: false, remaining: 0, distance: Infinity, headingError: 0 }; reward = { total: 0, lastValue: 0, lastAt: -1e9 }; alignmentAnchor = null; controller?.setMode('stand'); }
   else if (message.type === 'moveObstacle') moveObstacle(message.id, message.x, message.y);
   else if (message.type === 'editObstacle') editObstacle(message);
   else if (message.type === 'randomActors') { randomActors = !!message.enabled; randomSeed = Number.isFinite(message.seed) ? message.seed >>> 0 : Date.now() >>> 0; nextActorAt = (data?.time ?? 0) + 2; }
@@ -102,6 +121,9 @@ async function init(message) {
 }
 
 function reset() {
+  armWork.cancel();
+  filteredLeftSpeed = 0;
+  encounterPlanner.reset();
   localDetour.reset();
   clearPedestrians();
   riskTracker.reset(); perception = null; perceptionAt = -Infinity;
@@ -156,6 +178,7 @@ function controlStep(dt) {
   const orientation = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]);
   const wasWalking = controller.mode === 'walk';
   controller.checkSafety({ ...orientation, height: data.qpos[2] });
+  if (controller.fault) armWork.cancel();
   if (autoRecover && !manualControl.enabled && wasWalking && controller.fault && recoveryAttempts < 2 && Math.abs(orientation.roll) > 0.65) {
     recovery = { stage: 'waiting', started: data.time, yaw: orientation.yaw, resume: true };
     recoveryAttempts++;
@@ -175,6 +198,15 @@ function controlStep(dt) {
     controller.setCommand(manualControl.latched || manualControl.mode !== 'walk' ? { vx: 0, vy: 0, yawRate: 0 } : value);
     navigation = { active: false, remaining: waypoints.length, distance: Infinity, headingError: 0 };
     avoidance = { active: false, direction: 0, clearance: Infinity };
+    if (armWork.task && armWork.sample(data.time).done) armWork.cancel();
+  } else if (armWork.task) {
+    controller.setMode('stand'); controller.setCommand({ vx: 0, vy: 0, yawRate: 0 });
+    servoWorldVelocity = null;
+    avoidance = { active: false, direction: 0, clearance: Infinity };
+    if (armWork.sample(data.time).done) {
+      if (waypoints[0]) waypoints[0].actionDone = true;
+      armWork.cancel(); controller.setMode('walk');
+    }
   } else updateAvoidance(orientation.yaw, updateNavigation(orientation.yaw));
   const target = controller.targets(dt);
   applyPlanarVelocityAssist(orientation, dt);
@@ -210,8 +242,14 @@ function applyPlanarVelocityAssist(orientation, dt) {
     VELOCITY_ASSIST_PROFILE.openStraightSpeed + 0.15
       + 0.5 * (VELOCITY_ASSIST_PROFILE.openStraightSpeed - filteredForwardSpeed)));
   if (escaping) targetForwardVelocity = 1.08;
-  let targetLeftVelocity = Math.max(-VELOCITY_ASSIST_PROFILE.maxLateralServoSpeed,
-    Math.min(VELOCITY_ASSIST_PROFILE.maxLateralServoSpeed, speedScale * command.vy));
+  const lateralLimit = avoidance.strategy === 'dynamic-dodge' ? ENCOUNTER.lateralSpeed : VELOCITY_ASSIST_PROFILE.maxLateralServoSpeed;
+  let targetLeftVelocity = Math.max(-lateralLimit, Math.min(lateralLimit, speedScale * command.vy));
+  if (avoidance.strategy === 'dynamic-dodge') {
+    // Preview-only feedback compensates lateral gait drag; predictions use
+    // measured net motion, not the faster root-position assist command.
+    const desired = Math.sign(command.vy) * ENCOUNTER.lateralSpeed;
+    targetLeftVelocity = Math.max(-.5, Math.min(.5, desired + .7 * (desired - filteredLeftSpeed)));
+  }
   if (alignmentAnchor) {
     const correctionX = Math.max(-0.2, Math.min(0.2, (alignmentAnchor[0] - data.qpos[0]) * 1.8));
     const correctionY = Math.max(-0.2, Math.min(0.2, (alignmentAnchor[1] - data.qpos[1]) * 1.8));
@@ -286,12 +324,25 @@ function updateNavigation(yaw) {
         remaining: waypoints.length, target: current, distance: plan.distance, headingError: plan.headingError };
       return plan.command;
     }
+    if (current.action !== 'none' && current.action && !current.actionDone) {
+      if (controller.mode === 'walk') {
+        if (!current.arrivalRewarded && progress.reward) {
+          reward = { total: reward.total + progress.reward, lastValue: progress.reward, lastAt: data.time };
+          current.arrivalRewarded = true;
+        }
+        armWork.start(current, data.time); controller.setMode('stand');
+        navigation = { active: true, working: true, remaining: waypoints.length, target: current, distance: plan.distance };
+        postMessage({ type: 'waypoint', event: 'work-start', waypoint: current });
+      }
+      return sanitizeCommand({ vx: 0, vy: 0, yawRate: 0 });
+    }
     alignmentAnchor = null;
     const reached = waypoints.shift();
     if (waypoints.length) waypoints[0].segmentStart = { x: reached.x, y: reached.y };
     avoidance = { active: false, direction: 0, clearance: Infinity };
-    if (progress.reward) reward = { total: reward.total + progress.reward, lastValue: progress.reward, lastAt: data.time };
-    postMessage({ type: 'waypoint', event: 'reached', waypoint: reached, reward: progress.reward, totalReward: reward.total });
+    const value = reached.arrivalRewarded ? 0 : progress.reward;
+    if (value) reward = { total: reward.total + value, lastValue: value, lastAt: data.time };
+    postMessage({ type: 'waypoint', event: 'reached', waypoint: reached, reward: value, totalReward: reward.total });
   }
   if (navigation.active) controller.setMode('stand');
   alignmentAnchor = null;
@@ -300,6 +351,7 @@ function updateNavigation(yaw) {
 }
 
 function updateAvoidance(yaw, navigationCommand) {
+  if (armWork.task) { avoidance = { active: false, direction: 0, clearance: Infinity }; controller.setCommand({ vx: 0, vy: 0, yawRate: 0 }); return; }
   const command = navigationCommand || requestedCommand || controller.command;
   const straightCruise = !navigationCommand && command.vx > 0.05 && Math.abs(command.vy) < 0.05 && Math.abs(command.yawRate) < 0.03;
   if (straightCruise && !Number.isFinite(cruiseHeading)) cruiseHeading = yaw;
@@ -307,20 +359,29 @@ function updateAvoidance(yaw, navigationCommand) {
   const pose = { x: data.qpos[0], y: data.qpos[1], yaw };
   const target = waypoints[0];
   if (navigation.blocked) { controller.setCommand(command); return; }
-  const moving = obstacles.filter(isDynamic);
   if (controller.mode === 'walk' && rearEscapeSafe(pose, obstacles, filteredForwardSpeed)) {
+    encounterPlanner.reset();
     avoidance = { active: true, strategy: 'dynamic-escape', heading: yaw, direction: 0, clearance: Infinity };
     alignmentAnchor = null; navigation.aligning = false; navigation.recovering = false;
     if (target) { target.recovering = false; target.lastProgressAt = data.time; target.bestDistance = navigation.distance; }
     controller.setCommand({ vx: 0.6, vy: 0, yawRate: 0 }); return;
   }
-  const probe = { x: pose.x + Math.cos(yaw) * Math.max(0.6, filteredForwardSpeed * 1.5), y: pose.y + Math.sin(yaw) * Math.max(0.6, filteredForwardSpeed * 1.5) };
-  if (moving.some(o => [0, 0.5, 1].some(t => !waypointRouteClear(pose, probe,
-    [{ ...o, x: o.x + (o.vx || 0) * t, y: o.y + (o.vy || 0) * t }], yaw)))) {
-    avoidance = { active: true, strategy: 'dynamic-wait', heading: yaw, direction: 0, clearance: 0 };
-    alignmentAnchor ||= [pose.x, pose.y]; navigation.aligning = false; navigation.recovering = false;
+  const encounter = controller.mode === 'walk' && encounterPlanner.plan(pose, command, obstacles, data.time,
+    { vx: filteredForwardSpeed * Math.cos(yaw) - filteredLeftSpeed * Math.sin(yaw),
+      vy: filteredForwardSpeed * Math.sin(yaw) + filteredLeftSpeed * Math.cos(yaw) }, target);
+  if (encounter) {
+    avoidance = { ...encounter, active: true, clearance: 0 };
+    alignmentAnchor = encounter.strategy === 'dynamic-wait' ? (alignmentAnchor || [pose.x, pose.y]) : null;
+    navigation.aligning = false; navigation.recovering = false;
+    localDetour.reset();
     if (target) { target.recovering = false; target.lastProgressAt = data.time; target.bestDistance = navigation.distance; }
-    controller.setCommand({ vx: 0, vy: 0, yawRate: 0 }); return;
+    controller.setCommand(encounter.command); return;
+  }
+  if (avoidanceEnabled && rearBufferDeparture(pose, target, obstacles)) {
+    avoidance = { active: true, strategy: 'rear-buffer-departure', heading: yaw, direction: 0, clearance: Infinity };
+    localDetour.reset(); alignmentAnchor = null;
+    navigation.aligning = false; navigation.recovering = false;
+    controller.setCommand({ vx: .16, vy: 0, yawRate: 0 }); return;
   }
   const passage = avoidanceEnabled && planPassage(pose, target, obstacles);
   const crowded = obstacles.filter(o => !isTraversable(o) && !isDynamic(o)
@@ -357,6 +418,9 @@ function updateAvoidance(yaw, navigationCommand) {
   // A detour is subordinate to the waypoint, never an independent cruise.
   if (avoidanceEnabled && target && waypointRouteClear(pose, target, obstacles)) {
     if (avoidance.active) {
+      // The released route was checked toward the target, not toward a point
+      // on the old segment which can lie across the obstacle just passed.
+      if (avoidance.strategy === 'detour' || avoidance.strategy?.startsWith('dynamic-')) target.segmentStart = { x: pose.x, y: pose.y };
       target.tracking = false; target.recovering = false;
       avoidance = { active: false, direction: 0, clearance: Infinity };
       controller.setCommand(updateNavigation(yaw));
@@ -417,6 +481,7 @@ function moveObstacle(id, x, y) {
 }
 
 function editObstacle(message) {
+  if (!message.automatic && armWork.task) armWork.cancel();
   if (!model) return;
   let next = obstacles.map(o => ({ ...o }));
   const index = next.findIndex(o => o.id === message.id);
@@ -489,6 +554,8 @@ export function step() {
   const yaw = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]).yaw;
   const measuredForwardSpeed = ((data.qpos[0] - beforeX) * Math.cos(yaw) + (data.qpos[1] - beforeY) * Math.sin(yaw)) / model.opt.timestep;
   filteredForwardSpeed = lowPass(filteredForwardSpeed, measuredForwardSpeed, VELOCITY_ASSIST_PROFILE.velocityFilterTimeConstant, model.opt.timestep);
+  const measuredLeftSpeed = (-(data.qpos[0] - beforeX) * Math.sin(yaw) + (data.qpos[1] - beforeY) * Math.cos(yaw)) / model.opt.timestep;
+  filteredLeftSpeed = lowPass(filteredLeftSpeed, measuredLeftSpeed, VELOCITY_ASSIST_PROFILE.velocityFilterTimeConstant, model.opt.timestep);
 }
 
 function assistedRecoveryStep() {
@@ -568,7 +635,7 @@ export function postPose() {
   postMessage({ type: 'pose', time: data.time, xpos, xquat, base: [data.qpos[0], data.qpos[1], data.qpos[2]], orientation,
     velocity: [data.qvel[0], data.qvel[1], data.qvel[2]], forwardSpeed: filteredForwardSpeed, forwardSpeedInstantaneous, perception,
     forwardServoAcceleration, assistSpeedScale, locomotionStabilityScale,
-    recovery: recovery?.stage ?? null, mode: controller.mode, command: controller.command, requestedCommand, avoidance, navigation, reward, obstacles, fault: controller.fault }, [xpos.buffer, xquat.buffer]);
+    armWork: armWork.sample(data.time), recovery: recovery?.stage ?? null, mode: controller.mode, command: controller.command, requestedCommand, avoidance, navigation, reward, obstacles, fault: controller.fault }, [xpos.buffer, xquat.buffer]);
 }
 
 function loop() {

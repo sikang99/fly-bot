@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "node --test test/*.test.js",
+    "test:environments": "node --test test/a2-environments.test.js test/a2-detour.test.js test/a2-passage.test.js test/a2-rear-buffer.test.js test/a2-recovery.test.js test/a2-low-step.test.js test/a2-encounter.test.js",
     "jetson:doctor": "python3 deploy/jetson/ant_jetson.py doctor",
     "jetson:test": "python3 -B -m unittest discover -s deploy/jetson -p 'test_*.py' -v",
     "jetson:pack": "python3 deploy/jetson/ant_jetson.py pack",

@@ -1,4 +1,13 @@
 import { sanitizeCommand } from './config.js';
+export function webManualCommand(keys, direction = '') {
+  const has = key => keys.has(key);
+  const arrows = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].some(has);
+  return { held: !!direction || arrows || has('ShiftLeft') || has('ShiftRight'), command: {
+    vx: (Number(direction === 'front' || has('ArrowUp') || has('KeyW')) - Number(direction === 'back' || has('ArrowDown') || has('KeyS'))) * .6,
+    vy: (Number(direction === 'left' || has('ArrowLeft') || has('KeyQ')) - Number(direction === 'right' || has('ArrowRight') || has('KeyE'))) * .35,
+    yawRate: (Number(direction === 'turnLeft' || has('KeyA')) - Number(direction === 'turnRight' || has('KeyD'))) * .35,
+  } };
+}
 export class ManualControl {
   constructor() { this.enabled = false; this.stop(); }
   enter(enabled) { this.enabled = enabled; this.latched = false; this.mode = 'stand'; this.armed = false; this.lastAt = -Infinity; this.value = sanitizeCommand(); }

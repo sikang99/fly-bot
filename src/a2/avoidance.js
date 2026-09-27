@@ -20,14 +20,14 @@ export function obstacleRelativeGeometry(pose, obstacle) {
 
 // Segment/AABB test with a rotation-safe body envelope. Used to release a
 // detour only when the complete route to the current target is unobstructed.
-export function waypointRouteClear(pose, target, obstacles, fixedYaw = null) {
+export function waypointRouteClear(pose, target, obstacles, fixedYaw = null, margin = A2_FOOTPRINT.margin) {
   const radius = Math.hypot(A2_FOOTPRINT.halfLength, A2_FOOTPRINT.halfWidth) + A2_FOOTPRINT.margin;
   return obstacles.filter(o => !isTraversable(o)).map(obstacleWorldBounds).every(o => {
     let lo = 0, hi = 1;
     for (const [axis, half] of [['x', o.halfX], ['y', o.halfY]]) {
       const delta = target[axis] - pose[axis];
       const c = Math.abs(Math.cos(fixedYaw ?? 0)), s = Math.abs(Math.sin(fixedYaw ?? 0));
-      const extent = fixedYaw === null ? radius : A2_FOOTPRINT.margin + (axis === 'x'
+      const extent = fixedYaw === null ? radius : margin + (axis === 'x'
         ? c * A2_FOOTPRINT.halfLength + s * A2_FOOTPRINT.halfWidth
         : s * A2_FOOTPRINT.halfLength + c * A2_FOOTPRINT.halfWidth);
       const min = o[axis] - half - extent, max = o[axis] + half + extent;
