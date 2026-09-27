@@ -2,8 +2,16 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { loadNeurons, loadGraph, loadSkeletons } from './data.js';
 import { FlyBrain } from './brain.js';
+import { telemetryDrives, selectLinkGroups } from './a2/connectome-link.js';
 
 const $ = (s) => document.querySelector(s);
+const a2Embedded = new URLSearchParams(location.search).get('embed') === 'a2';
+if (a2Embedded) {
+  document.body.classList.add('a2-embedded');
+  addEventListener('keydown', event => {
+    if (event.code === 'Space') { event.preventDefault(); event.stopImmediatePropagation(); parent.postMessage({ type: 'a2-emergency-stop' }, location.origin); }
+  }, true);
+}
 const status = (s) => { $('#status').textContent = s; };
 
 // ---------- palettes ----------
@@ -41,20 +49,46 @@ async function main() {
   const show = (k) => (s) => { lines[k] = s; bg.innerHTML = Object.values(lines).filter(Boolean).map(x => `<div>${x}</div>`).join(''); };
   const done = (k) => { lines[k] = ''; show(k)(''); if (!lines.graph && !lines.skel) bg.remove(); };
   show('graph')(lines.graph);
-  const skelP = loadSkeletons(show('skel')).then(sk => { addSkeletons(sk); done('skel'); }).catch(e => show('skel')('skeletons failed: ' + e.message));
+  const skelP = a2Embedded ? Promise.resolve().then(() => done('skel')) : loadSkeletons(show('skel')).then(sk => { addSkeletons(sk); done('skel'); }).catch(e => show('skel')('skeletons failed: ' + e.message));
   $('#play').disabled = true;
   await loadGraph(data, show('graph'));
   show('graph')('starting simulation');
-  brain = new FlyBrain(data);
+  brain = new FlyBrain(data, a2Embedded ? { gpu: false } : {});
+  if (a2Embedded) addEventListener('pagehide', () => brain.destroy(), { once: true });
   await brain.ready;
   buildSimUI();
   $('#play').disabled = false;
   applyDeepLink();
   if (selected >= 0) renderSelection();
-  $('#summary').textContent = `${N.toLocaleString()} traced neurons · ${data.E.toLocaleString()} connections (model uses ≥5-synapse connections)`;
+  $('#summary').textContent = `${N.toLocaleString()} neurons · ${data.E.toLocaleString()} connections (≥${brain.params.minSyn}-synapse model)`;
+  if (a2Embedded) {
+    $('#showMode').value = 'somas'; $('#showMode').dispatchEvent(new Event('change'));
+    $('#colorMode').value = 'activity'; $('#colorMode').dispatchEvent(new Event('change'));
+    attachRobotTelemetry();
+  }
   brain.onFrame(onFrame);
   done('graph');
   await skelP;
+}
+
+function attachRobotTelemetry() {
+  const groups = selectLinkGroups(data);
+  const status = document.createElement('div'); status.className = 'note';
+  $('#panel header').append(status);
+  let lastInput = -Infinity, pose = null;
+  addEventListener('message', event => {
+    if (event.origin !== location.origin || event.source !== parent || event.data?.type !== 'a2-telemetry') return;
+    pose = event.data.pose; lastInput = performance.now();
+  });
+  const timer = setInterval(() => {
+    const fresh = performance.now() - lastInput < 500;
+    const rates = telemetryDrives(fresh ? pose : null);
+    for (const [key, ids] of Object.entries(groups)) brain.drive(ids, rates[key]);
+    status.textContent = fresh ? `로봇 상태 수신 · 이동 ${rates.motion.toFixed(0)} / 회전 ${rates.turn.toFixed(0)} / 장애물 ${rates.obstacle} / 팔 ${rates.arm} Hz · 실험적 매핑, 제어 출력 없음`
+      : '로봇 상태 수신 대기/만료 · 자극 0 Hz';
+  }, 100);
+  addEventListener('pagehide', () => clearInterval(timer), { once: true });
+  $('#play').click();
 }
 
 // ---------- scene ----------

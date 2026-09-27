@@ -20,10 +20,34 @@ export function obstacleRelativeGeometry(pose, obstacle) {
 
 // Segment/AABB test with a rotation-safe body envelope. Used to release a
 // detour only when the complete route to the current target is unobstructed.
+export function footprintAxes(yaw) {
+  return [[1, 0], [0, 1], [Math.cos(yaw), Math.sin(yaw)], [-Math.sin(yaw), Math.cos(yaw)]];
+}
+export function footprintExtent(o, yaw, ax, ay, margin = 0) {
+  return Math.abs(ax) * o.halfX + Math.abs(ay) * o.halfY
+    + Math.abs(ax * Math.cos(yaw) + ay * Math.sin(yaw)) * A2_FOOTPRINT.halfLength
+    + Math.abs(-ax * Math.sin(yaw) + ay * Math.cos(yaw)) * A2_FOOTPRINT.halfWidth + margin;
+}
 export function waypointRouteClear(pose, target, obstacles, fixedYaw = null, margin = A2_FOOTPRINT.margin) {
   const radius = Math.hypot(A2_FOOTPRINT.halfLength, A2_FOOTPRINT.halfWidth) + A2_FOOTPRINT.margin;
   return obstacles.filter(o => !isTraversable(o)).map(obstacleWorldBounds).every(o => {
     let lo = 0, hi = 1;
+    if (fixedYaw !== null) {
+      // Continuous SAT: overlap intervals on world AND body axes must share
+      // a common time. World-AABB-only inflation rejects empty corner space.
+      for (const [ax, ay] of footprintAxes(fixedYaw)) {
+        const start = (pose.x - o.x) * ax + (pose.y - o.y) * ay;
+        const delta = (target.x - pose.x) * ax + (target.y - pose.y) * ay;
+        const extent = footprintExtent(o, fixedYaw, ax, ay, margin);
+        if (Math.abs(delta) < 1e-9) { if (Math.abs(start) > extent) return true; }
+        else {
+          const a = (-extent - start) / delta, b = (extent - start) / delta;
+          lo = Math.max(lo, Math.min(a, b)); hi = Math.min(hi, Math.max(a, b));
+          if (lo > hi) return true;
+        }
+      }
+      return false;
+    }
     for (const [axis, half] of [['x', o.halfX], ['y', o.halfY]]) {
       const delta = target[axis] - pose[axis];
       const c = Math.abs(Math.cos(fixedYaw ?? 0)), s = Math.abs(Math.sin(fixedYaw ?? 0));

@@ -617,6 +617,14 @@ export function simulateSideFallForTest() {
   mj.mj_forward(model, data);
 }
 
+// Node-only regression setup; never exposed as a browser worker command.
+export function setPlanarPoseForTest(x, y, yaw) {
+  if (typeof process === 'undefined' || ![x, y, yaw].every(Number.isFinite)) throw new Error('invalid test pose');
+  data.qpos[0] = x; data.qpos[1] = y;
+  data.qpos[3] = Math.cos(yaw / 2); data.qpos[4] = 0; data.qpos[5] = 0; data.qpos[6] = Math.sin(yaw / 2);
+  data.qvel.fill(0); localDetour.reset(); alignmentAnchor = null; mj.mj_forward(model, data);
+}
+
 function updateDynamicObstacles() {
   for (const id of pedestrians.keys()) if (!obstacles.some(o => o.id === id)) pedestrians.delete(id);
   const expired = obstacles.find(o => o.automatic && data.time - o.born > 12);
@@ -653,7 +661,7 @@ export function postPose() {
   const orientation = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]);
   const forwardSpeedInstantaneous = data.qvel[0] * Math.cos(orientation.yaw) + data.qvel[1] * Math.sin(orientation.yaw);
   postMessage({ type: 'pose', time: data.time, xpos, xquat, base: [data.qpos[0], data.qpos[1], data.qpos[2]], orientation,
-    velocity: [data.qvel[0], data.qvel[1], data.qvel[2]], forwardSpeed: filteredForwardSpeed, forwardSpeedInstantaneous, perception,
+    velocity: [data.qvel[0], data.qvel[1], data.qvel[2]], forwardSpeed: filteredForwardSpeed, lateralSpeed: filteredLeftSpeed, forwardSpeedInstantaneous, perception,
     forwardServoAcceleration, assistSpeedScale, locomotionStabilityScale,
     armWork: armWork.sample(data.time), recovery: recovery?.stage ?? null, mode: controller.mode, command: controller.command, requestedCommand, avoidance, navigation, reward, obstacles, fault: controller.fault }, [xpos.buffer, xquat.buffer]);
 }

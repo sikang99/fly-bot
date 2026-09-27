@@ -38,6 +38,29 @@ for (const side of ['front', 'rear']) $(`#${side}Camera`).onclick = () => {
   $('#viewDirection').textContent = `${side.toUpperCase()} · H-FOV 78° (가정)`;
 };
 let robotCameraReady = false;
+let cameraVisible = true;
+let lastBrainTelemetry = -Infinity;
+$('#cameraToggle').onclick = () => {
+  cameraVisible = !cameraVisible;
+  $('#visionPanel').hidden = !cameraVisible;
+  $('#cameraToggle').setAttribute('aria-expanded', String(cameraVisible));
+  resize();
+};
+function toggleBrain(open) {
+  $('#brainPanel').hidden = !open;
+  $('#brainToggle').setAttribute('aria-expanded', String(open));
+  document.body.classList.toggle('brain-open', open);
+  if (open) {
+    const frame = document.createElement('iframe'); frame.title = 'A2 상태 입력 커넥톰 — 관찰용 단방향 연결';
+    frame.src = `${BASE}index.html?embed=a2&gpu=0`; $('#brainMount').replaceChildren(frame);
+  } else $('#brainMount').replaceChildren();
+  resize();
+}
+$('#brainToggle').onclick = () => toggleBrain($('#brainPanel').hidden);
+$('#brainClose').onclick = () => toggleBrain(false);
+addEventListener('message', event => {
+  if (event.origin === location.origin && event.source === $('#brainMount iframe')?.contentWindow && event.data?.type === 'a2-emergency-stop') emergencyStop();
+});
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0b1118');
 scene.fog = new THREE.Fog('#0b1118', 8, 25);
@@ -614,6 +637,14 @@ function pollManual() {
 }
 
 function renderTelemetry(data) {
+  if (performance.now() - lastBrainTelemetry >= 100) {
+    lastBrainTelemetry = performance.now();
+    $('#brainMount iframe')?.contentWindow?.postMessage({ type: 'a2-telemetry', pose: {
+      mode: data.mode, fault: data.fault, forwardSpeed: data.forwardSpeed, lateralSpeed: data.lateralSpeed,
+      command: { yawRate: data.command?.yawRate, vy: data.command?.vy },
+      avoidance: { active: data.avoidance?.active }, armWork: { active: data.armWork?.active },
+    } }, location.origin);
+  }
   const work = data.armWork;
   for (const button of document.querySelectorAll('[data-drive]')) button.disabled = !manualMode || manualStopped || data.mode !== 'walk' || !!work?.active;
   $('#manualArmWork').disabled = !manualMode || manualStopped || data.mode !== 'stand' || !!data.fault || !!work?.active;
@@ -689,7 +720,7 @@ function resize() {
   const width = canvas.clientWidth, height = canvas.clientHeight;
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); renderer.setSize(width, height, false);
   camera.aspect = width / height; camera.updateProjectionMatrix();
-  const viewWidth = robotViewCanvas.clientWidth, viewHeight = robotViewCanvas.clientHeight;
+  const viewWidth = robotViewCanvas.clientWidth || 360, viewHeight = robotViewCanvas.clientHeight || 220;
   robotRenderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)); robotRenderer.setSize(viewWidth, viewHeight, false);
   robotCamera.aspect = viewWidth / viewHeight;
   robotCamera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(39)) / robotCamera.aspect));
@@ -711,7 +742,7 @@ function animate() {
     controls.target.lerp(target, 0.05);
   }
   controls.update(); renderer.render(scene, camera);
-  if (robotCameraReady) robotRenderer.render(scene, activeRobotCamera());
+  if (robotCameraReady && cameraVisible && !editorMode) robotRenderer.render(scene, activeRobotCamera());
 }
 
 boot().catch(error => { equipmentBeacon.error = error.message; $('#status').textContent = 'LOAD FAILED'; $('#status').className = 'fault'; $('#fault').textContent = error.message; });

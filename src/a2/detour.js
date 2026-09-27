@@ -1,4 +1,4 @@
-import { A2_FOOTPRINT, waypointRouteClear } from './avoidance.js';
+import { footprintAxes, footprintExtent, waypointRouteClear } from './avoidance.js';
 import { isTraversable } from './terrain.js';
 import { isDynamic, obstacleWorldBounds } from './dynamic.js';
 import { sanitizeCommand } from './config.js';
@@ -17,12 +17,11 @@ export function detourEdgeClear(pose, next, obstacles, yaw) {
     if (waypointRouteClear(pose, next, [o], yaw)) return true;
     if (isDynamic(o) || waypointRouteClear(pose, pose, [o], yaw)
       || !waypointRouteClear(pose, next, [o], yaw, .02)) return false;
-    const box = obstacleWorldBounds(o), c = Math.abs(Math.cos(yaw)), s = Math.abs(Math.sin(yaw));
-    return [['x', box.halfX + c * A2_FOOTPRINT.halfLength + s * A2_FOOTPRINT.halfWidth],
-      ['y', box.halfY + s * A2_FOOTPRINT.halfLength + c * A2_FOOTPRINT.halfWidth]].some(([axis, extent]) => {
-      const offset = pose[axis] - box[axis];
-      return Math.abs(offset) > extent + .02
-        && (next[axis] - pose[axis]) * Math.sign(offset) > 1e-8;
+    const box = obstacleWorldBounds(o);
+    return footprintAxes(yaw).some(([ax, ay]) => {
+      const offset = (pose.x - box.x) * ax + (pose.y - box.y) * ay;
+      return Math.abs(offset) > footprintExtent(box, yaw, ax, ay, .02)
+        && ((next.x - pose.x) * ax + (next.y - pose.y) * ay) * Math.sign(offset) > 1e-8;
     });
   });
 }

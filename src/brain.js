@@ -2,7 +2,7 @@
 // Designed to be instantiated once per fly. Inputs: drive(indices, rateHz) / pulse. Outputs: onFrame(trace, spikes).
 const BASE = import.meta.env.BASE_URL; // "/" in dev, "/fly-brain/" on GitHub Pages
 export class FlyBrain {
-  constructor(data) {
+  constructor(data, overrides = {}) {
     this.data = data; this.N = data.N;
     this.worker = new Worker(new URL('./sim.worker.js', import.meta.url), { type: 'module' });
     this.listeners = new Set();
@@ -17,6 +17,7 @@ export class FlyBrain {
     Promise.all([fetch(`${BASE}data/neuron_size.bin`).then(r => r.arrayBuffer()), fetch(`${BASE}data/ntsign.bin`).then(r => r.arrayBuffer()),
       fetch(`${BASE}data/brain_params.json`).then(r => r.json()), fetch(`${BASE}lif.wasm`).then(r => r.arrayBuffer()).then(b => WebAssembly.compile(b)),
       fetch(`${BASE}data/neuromod.json`).then(r => r.ok ? r.json() : null).catch(() => null)]).then(([sz, sg, params, wasm, neuromod]) => {
+      params = { ...params, ...overrides };
       this.params = params;
       this.worker.postMessage({ type: 'init', N: data.N, E: data.E, meta: data.meta, indptr: data.indptr, indices: data.indices, weights: data.weights, nt: data.nt,
         superclass: data.superclass, cls: data.cls, side: data.side, size: new Float32Array(sz), sign: new Float32Array(sg), params: { ...params, neuromod: !!(params.neuromod && neuromod) }, neuromod, wasm });

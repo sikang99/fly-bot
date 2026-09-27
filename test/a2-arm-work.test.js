@@ -17,7 +17,22 @@ test('front and both side poses extend straight and finish folded; invalid actio
   }
 });
 
-test('MuJoCo executes three arm waypoints stationary, folds, resumes and rewards once', async () => {
+test('wave extends left, sweeps via front to right and folds continuously', () => {
+  const work = new ArmWork(); assert.equal(work.start({ id: 'wave', action: 'wave' }, 0), true);
+  for (const [time, yaw] of [[3, Math.PI / 2], [4, Math.PI / 2], [5.5, 0], [7, -Math.PI / 2], [9, -Math.PI / 2]]) {
+    const pose = work.sample(time).pose;
+    assert.equal(pose.yaw, yaw); assert.equal(pose.shoulder, Math.PI / 2); assert.equal(pose.elbow, 0);
+  }
+  assert.equal(work.sample(10.99).done, false); assert.equal(work.sample(11).done, true);
+  assert.equal(work.sample(11).pose.shoulder, ARM_STOW_POSE.shoulderPitch);
+  for (const boundary of [1, 3, 4, 7, 9, 11]) {
+    const before = armWorkPose('wave', boundary - .0001), after = armWorkPose('wave', boundary + .0001);
+    for (const key of Object.keys(before)) assert.ok(Math.abs(before[key] - after[key]) < .001);
+  }
+  work.cancel(); assert.equal(work.sample(5).active, false);
+});
+
+test('MuJoCo executes four arm waypoints stationary, folds, resumes and rewards once', async () => {
   let pose;
   const events = [];
   globalThis.postMessage = m => { if (m.type === 'pose') pose = m; if (m.type === 'waypoint') events.push(m); };
@@ -26,7 +41,7 @@ test('MuJoCo executes three arm waypoints stationary, folds, resumes and rewards
   await send({ type: 'init', xml: fs.readFileSync(new URL('../public/a2/a2.xml', import.meta.url), 'utf8') });
   await send({ type: 'moveObstacle', id: 'demo_box', x: 15, y: 15 });
   for (let i = 0; i < 1500; i++) sim.step();
-  const route = ['front', 'left', 'right', 'none'].map((action, i) => ({ id: `w${i}`, x: (i + 1) * .8, y: 0, action }));
+  const route = ['front', 'left', 'right', 'wave', 'none'].map((action, i) => ({ id: `w${i}`, x: (i + 1) * .8, y: 0, action }));
   for (const waypoint of route) await send({ type: 'addWaypoint', waypoint });
   const stages = new Set(), actions = new Set();
   for (let i = 0; i < 60000; i++) {
@@ -39,12 +54,12 @@ test('MuJoCo executes three arm waypoints stationary, folds, resumes and rewards
       const target = route.find(w => w.id === pose.armWork.id);
       assert.ok(Math.hypot(pose.base[0] - target.x, pose.base[1] - target.y) < .2);
     }
-    if (pose.reward.total === 4 && !pose.navigation.active) break;
+    if (pose.reward.total === 5 && !pose.navigation.active) break;
   }
-  assert.deepEqual([...actions].sort(), ['front', 'left', 'right']);
-  assert.equal(stages.size, 4); assert.equal(pose.reward.total, 4);
+  assert.deepEqual([...actions].sort(), ['front', 'left', 'right', 'wave']);
+  assert.equal(stages.size, 4); assert.equal(pose.reward.total, 5);
   assert.equal(pose.armWork.active, false); assert.equal(pose.mode, 'stand');
-  assert.equal(events.filter(m => m.event === 'reached').length, 4);
+  assert.equal(events.filter(m => m.event === 'reached').length, 5);
 
   // Editing a queued point is effective; cancellation never consumes it.
   await send({ type: 'addWaypoint', waypoint: { id: 'cancel', x: pose.base[0], y: pose.base[1], action: 'none' } });
