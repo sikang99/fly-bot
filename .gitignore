@@ -44,3 +44,6 @@ public/data/cord_kernel.bin
 public/data/cord_ens_tab.bin
 public/data/cord_search.bin
 ext/
+deploy/jetson/bundles/
+deploy/jetson/wheelhouse/
+deploy/jetson/*.onnx

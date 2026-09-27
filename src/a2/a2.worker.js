@@ -5,6 +5,26 @@ import { A2_FOOTPRINT, obstacleRelativeGeometry, planNearbyDocking, planObstacle
 import { WAYPOINT_PROGRESS_EPSILON, alignmentYawRate, assessWaypointProgress, planSegmentCommand, planWaypointRecovery, waypointNeedsRecovery } from './navigation.js';
 import { buildA2WorldXml } from './model.js';
 import { planPassage } from './passage.js';
+import { LocalDetour } from './detour.js';
+const localDetour = new LocalDetour();
+import { rearEscapeSafe } from './dynamic-safety.js';
+import { ManualControl } from './manual.js';
+import { pedestrianState, stepPedestrian } from './pedestrian.js';
+const pedestrians = new Map();
+let personYield = true;
+function clearPedestrians() {
+  for (const o of obstacles) {
+    const state = pedestrians.get(o.id);
+    if (state) { o.vx = state.cruiseVx; o.vy = state.cruiseVy; }
+    delete o.yielding;
+  }
+  pedestrians.clear();
+}
+import { RiskTracker, simulatedSensorFrame, PERCEPTION_PROFILE } from './perception.js';
+const riskTracker = new RiskTracker();
+let perception = null, perceptionAt = -Infinity;
+const manualControl = new ManualControl();
+import { isDynamic, crossingActor, actorHeading, obstacleWorldBounds } from './dynamic.js';
 import { isTraversable, worldObstacles } from './terrain.js';
 
 let mj, model, data, controller, running = false, timer = null, lastReal = 0, simBudget = 0, lastPose = 0;
@@ -22,19 +42,39 @@ let servoForwardVelocity = 0, servoLeftVelocity = 0;
 let locomotionStabilityScale = 1;
 let obstacles = A2_OBSTACLES.map(obstacle => ({ ...obstacle })), obstacleMocap = {};
 let sourceXml, terrainName, objectSerial = 0;
+let randomActors = false, nextActorAt = 0, randomSeed = 12345;
+let recovery = null, recoveryAttempts = 0, autoRecover = true;
+function randomActorValue() { randomSeed = (1664525 * randomSeed + 1013904223) >>> 0; return randomSeed / 4294967296; }
 
 globalThis.onmessage = async ({ data: message }) => {
   if (message.type === 'init') await init(message);
-  else if (message.type === 'mode') controller?.setMode(message.mode);
+  else if (message.type === 'mode') {
+    if (manualControl.enabled) {
+      manualControl.setMode(message.mode);
+      controller?.setMode(manualControl.latched ? 'passive' : manualControl.mode);
+    } else controller?.setMode(message.mode);
+    if (message.mode === 'passive') recovery = null;
+  }
+  else if (message.type === 'manualMode') {
+    manualControl.enter(!!message.enabled); recovery = null; alignmentAnchor = null; cruiseHeading = null;
+    servoForwardVelocity = 0; servoLeftVelocity = 0; servoWorldVelocity = null;
+    controller?.setMode('stand'); avoidance = { active: false, direction: 0, clearance: Infinity };
+    for (const target of waypoints) { target.tracking = false; target.recovering = false; }
+  }
+  else if (message.type === 'manualCommand') manualControl.receive(message, performance.now());
+  else if (message.type === 'emergencyStop') { manualControl.stop(); recovery = null; controller?.setMode('passive'); servoWorldVelocity = null; }
+  else if (message.type === 'autoRecover') { autoRecover = !!message.enabled; if (!autoRecover) recovery = null; }
   else if (message.type === 'command') { requestedCommand = sanitizeCommand(message.command); avoidanceEnabled = message.avoidance !== false; controller?.setCommand(requestedCommand); }
   else if (message.type === 'addWaypoint') {
     waypoints.push({ x: message.waypoint.x, y: message.waypoint.y, tracking: false,
       bestDistance: Infinity, lastProgressAt: data?.time ?? 0, recovering: false });
-    controller?.setMode('walk');
+    if (!manualControl.enabled) controller?.setMode('walk');
   }
   else if (message.type === 'clearWaypoints') { waypoints = []; navigation = { active: false, remaining: 0, distance: Infinity, headingError: 0 }; reward = { total: 0, lastValue: 0, lastAt: -1e9 }; alignmentAnchor = null; controller?.setMode('stand'); }
   else if (message.type === 'moveObstacle') moveObstacle(message.id, message.x, message.y);
   else if (message.type === 'editObstacle') editObstacle(message);
+  else if (message.type === 'randomActors') { randomActors = !!message.enabled; randomSeed = Number.isFinite(message.seed) ? message.seed >>> 0 : Date.now() >>> 0; nextActorAt = (data?.time ?? 0) + 2; }
+  else if (message.type === 'personYield') { clearPedestrians(); personYield = !!message.enabled; }
   else if (message.type === 'run') start();
   else if (message.type === 'pause') stop();
   else if (message.type === 'reset') reset();
@@ -62,8 +102,15 @@ async function init(message) {
 }
 
 function reset() {
+  localDetour.reset();
+  clearPedestrians();
+  riskTracker.reset(); perception = null; perceptionAt = -Infinity;
   if (!data) return;
+  manualControl.enter(manualControl.enabled);
+  recovery = null; recoveryAttempts = 0;
   mj.mj_resetData(model, data);
+  nextActorAt = 2;
+  for (const o of obstacles) if (isDynamic(o)) o.born = 0;
   data.qpos[0] = 0; data.qpos[1] = 0; data.qpos[2] = 0.62;
   data.qpos[3] = 1; data.qpos[4] = 0; data.qpos[5] = 0; data.qpos[6] = 0;
   for (const name of JOINT_ORDER) data.qpos[jointQ[name]] = name.endsWith('_hip') ? (name[1] === 'R' ? 0.1 : -0.1) : name.endsWith('_thigh') ? 0.9 : -1.8;
@@ -107,12 +154,28 @@ function controlStep(dt) {
   const position = {}, velocity = {};
   for (const name of JOINT_ORDER) { position[name] = data.qpos[jointQ[name]]; velocity[name] = data.qvel[jointV[name]]; }
   const orientation = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]);
+  const wasWalking = controller.mode === 'walk';
   controller.checkSafety({ ...orientation, height: data.qpos[2] });
+  if (autoRecover && !manualControl.enabled && wasWalking && controller.fault && recoveryAttempts < 2 && Math.abs(orientation.roll) > 0.65) {
+    recovery = { stage: 'waiting', started: data.time, yaw: orientation.yaw, resume: true };
+    recoveryAttempts++;
+  }
+  if (recovery) { data.ctrl.fill(0); servoWorldVelocity = null; return; }
   const measuredStability = tractionStabilityScale({ ...orientation, height: data.qpos[2], verticalSpeed: data.qvel[2] });
   locomotionStabilityScale = updateStabilityEnvelope(locomotionStabilityScale, measuredStability,
     VELOCITY_ASSIST_PROFILE.stabilityRecoveryRate, dt);
   controller.setMotionScale(locomotionStabilityScale);
-  updateAvoidance(orientation.yaw, updateNavigation(orientation.yaw));
+  if (manualControl.enabled) {
+    const value = manualControl.sample(performance.now());
+    // Passive naturally lowers the body; allow Stand to raise it again.
+    // Walking faults and unsafe tilt still latch the emergency stop.
+    if (controller.fault && (manualControl.mode === 'walk'
+      || (manualControl.mode === 'stand' && controller.fault === 'body tilt above safety limit'))) manualControl.stop();
+    controller.setMode(manualControl.latched ? 'passive' : manualControl.mode);
+    controller.setCommand(manualControl.latched || manualControl.mode !== 'walk' ? { vx: 0, vy: 0, yawRate: 0 } : value);
+    navigation = { active: false, remaining: waypoints.length, distance: Infinity, headingError: 0 };
+    avoidance = { active: false, direction: 0, clearance: Infinity };
+  } else updateAvoidance(orientation.yaw, updateNavigation(orientation.yaw));
   const target = controller.targets(dt);
   applyPlanarVelocityAssist(orientation, dt);
   const torque = controller.torques(position, velocity, target);
@@ -131,6 +194,22 @@ function applyPlanarVelocityAssist(orientation, dt) {
   assistSpeedScale += Math.max(-speedScaleStep, Math.min(speedScaleStep, targetSpeedScale - assistSpeedScale));
   const speedScale = assistSpeedScale;
   let targetForwardVelocity = speedScale * command.vx;
+  const escaping = avoidance.strategy === 'dynamic-escape';
+  // Preview-only straight cruise. Keep the tested joint gait unchanged and
+  // compensate its measured drag with bounded velocity feedback, not larger
+  // open-loop strides. Reserve distance for braking before turns/obstacles.
+  const clearAhead = obstacles.every(o => {
+    const g = obstacleRelativeGeometry({ x: data.qpos[0], y: data.qpos[1], yaw }, o);
+    return g.behind || g.clearance > VELOCITY_ASSIST_PROFILE.openStraightBrakeDistance
+      || g.lateralClearance > 0.4;
+  });
+  const fastStraight = !manualControl.enabled && !avoidance.active && !alignmentAnchor && clearAhead
+    && command.vx > 0.55 && Math.abs(command.vy) < 0.06 && Math.abs(command.yawRate) < 0.06
+    && (!navigation.active || navigation.distance > VELOCITY_ASSIST_PROFILE.openStraightBrakeDistance);
+  if (fastStraight) targetForwardVelocity = Math.max(0, Math.min(1.22,
+    VELOCITY_ASSIST_PROFILE.openStraightSpeed + 0.15
+      + 0.5 * (VELOCITY_ASSIST_PROFILE.openStraightSpeed - filteredForwardSpeed)));
+  if (escaping) targetForwardVelocity = 1.08;
   let targetLeftVelocity = Math.max(-VELOCITY_ASSIST_PROFILE.maxLateralServoSpeed,
     Math.min(VELOCITY_ASSIST_PROFILE.maxLateralServoSpeed, speedScale * command.vy));
   if (alignmentAnchor) {
@@ -143,7 +222,7 @@ function applyPlanarVelocityAssist(orientation, dt) {
   targetLeftVelocity *= locomotionStabilityScale;
   const previousForwardVelocity = servoForwardVelocity;
   servoForwardVelocity = accelerationLimitedVelocity(servoForwardVelocity, targetForwardVelocity,
-    VELOCITY_ASSIST_PROFILE.velocityServoGain, VELOCITY_ASSIST_PROFILE.maxPlanarAcceleration * locomotionStabilityScale,
+    VELOCITY_ASSIST_PROFILE.velocityServoGain, (escaping ? 0.6 : VELOCITY_ASSIST_PROFILE.maxPlanarAcceleration) * locomotionStabilityScale,
     VELOCITY_ASSIST_PROFILE.maxPlanarDeceleration, dt);
   servoLeftVelocity = accelerationLimitedVelocity(servoLeftVelocity, targetLeftVelocity,
     VELOCITY_ASSIST_PROFILE.velocityServoGain, VELOCITY_ASSIST_PROFILE.maxPlanarAcceleration * locomotionStabilityScale,
@@ -170,7 +249,7 @@ function updateNavigation(yaw) {
     current.segmentStart ||= { x: data.qpos[0], y: data.qpos[1] };
     let plan = planSegmentCommand({ x: data.qpos[0], y: data.qpos[1], heading: yaw }, current.segmentStart, current, { tracking: current.tracking });
     const progress = assessWaypointProgress(plan.distance);
-    if (plan.arrived && avoidanceEnabled && obstacles.some(o => !isTraversable(o)
+    if (plan.arrived && avoidanceEnabled && obstacles.map(obstacleWorldBounds).some(o => !isTraversable(o)
       && Math.abs(current.x - o.x) <= o.halfX && Math.abs(current.y - o.y) <= o.halfY)) {
       navigation = { active: true, blocked: true, remaining: waypoints.length, distance: plan.distance, target: current };
       avoidance = { active: false, direction: 0, clearance: Infinity };
@@ -228,7 +307,34 @@ function updateAvoidance(yaw, navigationCommand) {
   const pose = { x: data.qpos[0], y: data.qpos[1], yaw };
   const target = waypoints[0];
   if (navigation.blocked) { controller.setCommand(command); return; }
+  const moving = obstacles.filter(isDynamic);
+  if (controller.mode === 'walk' && rearEscapeSafe(pose, obstacles, filteredForwardSpeed)) {
+    avoidance = { active: true, strategy: 'dynamic-escape', heading: yaw, direction: 0, clearance: Infinity };
+    alignmentAnchor = null; navigation.aligning = false; navigation.recovering = false;
+    if (target) { target.recovering = false; target.lastProgressAt = data.time; target.bestDistance = navigation.distance; }
+    controller.setCommand({ vx: 0.6, vy: 0, yawRate: 0 }); return;
+  }
+  const probe = { x: pose.x + Math.cos(yaw) * Math.max(0.6, filteredForwardSpeed * 1.5), y: pose.y + Math.sin(yaw) * Math.max(0.6, filteredForwardSpeed * 1.5) };
+  if (moving.some(o => [0, 0.5, 1].some(t => !waypointRouteClear(pose, probe,
+    [{ ...o, x: o.x + (o.vx || 0) * t, y: o.y + (o.vy || 0) * t }], yaw)))) {
+    avoidance = { active: true, strategy: 'dynamic-wait', heading: yaw, direction: 0, clearance: 0 };
+    alignmentAnchor ||= [pose.x, pose.y]; navigation.aligning = false; navigation.recovering = false;
+    if (target) { target.recovering = false; target.lastProgressAt = data.time; target.bestDistance = navigation.distance; }
+    controller.setCommand({ vx: 0, vy: 0, yawRate: 0 }); return;
+  }
   const passage = avoidanceEnabled && planPassage(pose, target, obstacles);
+  const crowded = obstacles.filter(o => !isTraversable(o) && !isDynamic(o)
+    && Math.hypot(o.x - pose.x, o.y - pose.y) < 2 + Math.hypot(o.halfX, o.halfY)).length >= 2;
+  const rotationTight = navigation.aligning && !waypointRouteClear(pose, pose,
+    obstacles.filter(o => !isDynamic(o)));
+  const detour = localDetour.plan(pose, target, obstacles, data.time,
+    avoidanceEnabled && (localDetour.route || passage?.strategy === 'passage-blocked' || (!passage && (crowded || rotationTight))));
+  if (detour) {
+    avoidance = { active: true, strategy: detour.strategy, heading: detour.heading, direction: 0, clearance: Infinity };
+    alignmentAnchor = detour.strategy === 'detour-blocked' ? (alignmentAnchor || [pose.x, pose.y]) : null;
+    navigation.aligning = false; navigation.recovering = false;
+    controller.setCommand(detour.command); return;
+  }
   if (passage) {
     avoidance = { active: true, strategy: passage.strategy, heading: passage.heading, direction: 0, clearance: Infinity };
     if (passage.strategy === 'passage-align' || passage.strategy === 'passage-blocked') alignmentAnchor ||= [pose.x, pose.y];
@@ -303,6 +409,8 @@ function updateAvoidance(yaw, navigationCommand) {
 function moveObstacle(id, x, y) {
   const obstacle = obstacles.find(item => item.id === id);
   if (!obstacle || obstacle.movable === false || !Number.isFinite(x) || !Number.isFinite(y)) return;
+  const walking = pedestrians.get(id);
+  if (walking) { obstacle.vx = walking.cruiseVx; obstacle.vy = walking.cruiseVy; pedestrians.delete(id); }
   obstacle.x = x; obstacle.y = y; applyObstaclePose(obstacle);
   mj.mj_forward(model, data);
   postPose();
@@ -319,10 +427,13 @@ function editObstacle(message) {
     const o = message.obstacle;
     if (!o || !['x', 'y', 'halfX', 'halfY', 'halfZ'].every(k => Number.isFinite(o[k]))
       || o.halfX < 0.05 || o.halfX > 2 || o.halfY < 0.05 || o.halfY > 2 || o.halfZ < 0.005 || o.halfZ > 1
-      || Math.abs(o.x) > 18 || Math.abs(o.y) > 18) { postMessage({ type: 'editError', message: '크기 또는 위치가 허용 범위를 벗어났습니다.' }); return; }
+      || Math.abs(o.x) > (message.automatic ? 1000 : 18) || Math.abs(o.y) > (message.automatic ? 1000 : 18)) { postMessage({ type: 'editError', message: '크기 또는 위치가 허용 범위를 벗어났습니다.' }); return; }
     if (message.action === 'create') {
       if (next.length >= 32) { postMessage({ type: 'editError', message: '장애물은 최대 32개입니다.' }); return; }
-      next.push({ id: `custom_${++objectSerial}`, x: o.x, y: o.y, halfX: o.halfX, halfY: o.halfY, halfZ: o.halfZ, kind: o.kind === 'step' ? 'step' : 'box', movable: true });
+      const kind = ['step', 'person', 'car'].includes(o.kind) ? o.kind : 'box';
+      next.push({ id: `custom_${++objectSerial}`, x: o.x, y: o.y, halfX: o.halfX, halfY: o.halfY, halfZ: o.halfZ, kind, movable: true,
+        ...(isDynamic({ kind }) ? { vx: Number.isFinite(o.vx) ? o.vx : 0, vy: Number.isFinite(o.vy) ? o.vy : kind === 'person' ? -0.6 : -1.2,
+          born: data.time, automatic: !!message.automatic } : {}) });
     } else if (message.action === 'resize' && index >= 0) next[index] = { ...next[index], halfX: o.halfX, halfY: o.halfY, halfZ: o.halfZ };
     else return;
   }
@@ -338,12 +449,15 @@ function editObstacle(message) {
   bodyNames = Array.from({ length: model.nbody }, (_, i) => model.body(i).name);
   obstacleMocap = {};
   for (const o of obstacles) { obstacleMocap[o.id] = model.body_mocapid[model.body(`obstacle_${o.id}`).id]; applyObstaclePose(o); }
+  if (!message.automatic) {
+  if (manualControl.enabled) manualControl.stop();
   controller.setMode('stand'); requestedCommand = null; servoWorldVelocity = null;
   servoForwardVelocity = 0; servoLeftVelocity = 0; alignmentAnchor = null;
   avoidance = { active: false, direction: 0, clearance: Infinity };
   for (const waypoint of waypoints) { waypoint.tracking = false; waypoint.recovering = false; }
+  }
   mj.mj_forward(model, data);
-  postMessage({ type: 'worldChanged', bodyNames, selectedId: message.action === 'create' ? next.at(-1).id : message.action === 'delete' ? null : message.id });
+  postMessage({ type: 'worldChanged', bodyNames, automatic: !!message.automatic, selectedId: message.action === 'create' ? next.at(-1).id : message.action === 'delete' ? null : message.id });
   postPose();
 }
 
@@ -351,9 +465,19 @@ function applyObstaclePose(obstacle) {
   if (!data || obstacleMocap[obstacle.id] == null) return;
   const address = obstacleMocap[obstacle.id] * 3;
   data.mocap_pos[address] = obstacle.x; data.mocap_pos[address + 1] = obstacle.y; data.mocap_pos[address + 2] = obstacle.halfZ;
+  const q = obstacleMocap[obstacle.id] * 4, yaw = actorHeading(obstacle);
+  data.mocap_quat[q] = Math.cos(yaw / 2); data.mocap_quat[q + 1] = 0; data.mocap_quat[q + 2] = 0; data.mocap_quat[q + 3] = Math.sin(yaw / 2);
 }
 
 export function step() {
+  updateDynamicObstacles();
+  if (data.time - perceptionAt >= 1 / PERCEPTION_PROFILE.hz) {
+    const yaw = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]).yaw;
+    perception = riskTracker.update(simulatedSensorFrame({ x: data.qpos[0], y: data.qpos[1], yaw },
+      obstacles.filter(o => !isTraversable(o)), data.time));
+    perceptionAt = data.time;
+  }
+  if (recovery) { assistedRecoveryStep(); return; }
   const beforeX = data.qpos[0], beforeY = data.qpos[1];
   controlStep(model.opt.timestep);
   mj.mj_step(model, data);
@@ -367,6 +491,73 @@ export function step() {
   filteredForwardSpeed = lowPass(filteredForwardSpeed, measuredForwardSpeed, VELOCITY_ASSIST_PROFILE.velocityFilterTimeConstant, model.opt.timestep);
 }
 
+function assistedRecoveryStep() {
+  const dt = model.opt.timestep;
+  const pose = { x: data.qpos[0], y: data.qpos[1] };
+  const spaceClear = [0, 0.5, 1].every(t => waypointRouteClear(pose, pose,
+    obstacles.map(o => ({ ...o, x: o.x + (o.vx || 0) * t, y: o.y + (o.vy || 0) * t }))));
+  data.ctrl.fill(0); data.qfrc_applied.fill(0); servoWorldVelocity = null;
+  if (!spaceClear) { recovery.stage = 'waiting'; data.time += dt; return; }
+  if (recovery.stage === 'waiting') {
+    recovery.stage = 'assisted-righting'; recovery.started = data.time;
+    recovery.q = Array.from(data.qpos); recovery.height = data.qpos[2];
+  }
+  const t = Math.min(1, (data.time - recovery.started) / 3), blend = t * t * (3 - 2 * t);
+  const targetQ = [Math.cos(recovery.yaw / 2), 0, 0, Math.sin(recovery.yaw / 2)];
+  const sign = targetQ.reduce((sum, v, i) => sum + v * recovery.q[i + 3], 0) < 0 ? -1 : 1;
+  const q = targetQ.map((v, i) => recovery.q[i + 3] * (1 - blend) + sign * v * blend);
+  const norm = Math.hypot(...q);
+  q.forEach((v, i) => { data.qpos[i + 3] = v / norm; });
+  data.qpos[2] = recovery.height * (1 - blend) + 0.40 * blend;
+  for (const name of JOINT_ORDER) {
+    const nominal = name.endsWith('_hip') ? (name[1] === 'R' ? 0.1 : -0.1) : name.endsWith('_thigh') ? 0.9 : -1.8;
+    data.qpos[jointQ[name]] = recovery.q[jointQ[name]] * (1 - blend) + nominal * blend;
+  }
+  data.qvel.fill(0); data.time += dt; mj.mj_forward(model, data);
+  if (t === 1) {
+    recovery = null; controller = new A2WalkingController(); controller.setMode(waypoints.length ? 'walk' : 'stand');
+    servoForwardVelocity = 0; servoLeftVelocity = 0; locomotionStabilityScale = 0.5; alignmentAnchor = null;
+    avoidance = { active: false, direction: 0, clearance: Infinity };
+    for (const target of waypoints) { target.tracking = false; target.recovering = false; target.bestDistance = Infinity; target.lastProgressAt = data.time; }
+  }
+}
+
+// Deterministic Node regression fixture; deliberately not exposed as a worker
+// message or browser control. Exercises the same safety/recovery step as falls.
+export function simulateSideFallForTest() {
+  data.qpos[2] = 0.2; data.qpos[3] = Math.SQRT1_2; data.qpos[4] = Math.SQRT1_2;
+  data.qpos[5] = 0; data.qpos[6] = 0; data.qvel.fill(0); controller.setMode('walk');
+  mj.mj_forward(model, data);
+}
+
+function updateDynamicObstacles() {
+  for (const id of pedestrians.keys()) if (!obstacles.some(o => o.id === id)) pedestrians.delete(id);
+  const expired = obstacles.find(o => o.automatic && data.time - o.born > 12);
+  if (expired) editObstacle({ action: 'delete', id: expired.id, automatic: true });
+  if (randomActors && !manualControl.enabled && controller.mode === 'walk' && data.time >= nextActorAt) {
+    nextActorAt = data.time + 8 + randomActorValue() * 6;
+    const actor = crossingActor({ x: data.qpos[0], y: data.qpos[1] }, waypoints[0], randomActorValue);
+    if (actor && obstacles.length < 32 && !obstacles.some(o => Math.hypot(o.x - actor.x, o.y - actor.y) < Math.hypot(o.halfX, o.halfY) + 1.2)) {
+      editObstacle({ action: 'create', obstacle: actor, automatic: true });
+    }
+  }
+  for (const o of obstacles.filter(isDynamic)) {
+    const reversing = !o.automatic && Math.floor((data.time - o.born) / 6) !== Math.floor((data.time + model.opt.timestep - o.born) / 6);
+    if (personYield && o.kind === 'person') {
+      if (!pedestrians.has(o.id)) pedestrians.set(o.id, pedestrianState(o));
+      const state = pedestrians.get(o.id);
+      if (reversing) { state.cruiseVx *= -1; state.cruiseVy *= -1; state.active = false; state.side = 0; }
+      const yaw = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]).yaw;
+      Object.assign(o, stepPedestrian(o, state, { x: data.qpos[0], y: data.qpos[1], yaw,
+        vx: servoWorldVelocity?.[0] ?? data.qvel[0], vy: servoWorldVelocity?.[1] ?? data.qvel[1] }, obstacles, model.opt.timestep));
+    } else {
+      if (reversing) { o.vx *= -1; o.vy *= -1; }
+      o.x += o.vx * model.opt.timestep; o.y += o.vy * model.opt.timestep;
+    }
+    applyObstaclePose(o);
+  }
+}
+
 export function postPose() {
   if (!data) return;
   lastPose = performance.now();
@@ -375,9 +566,9 @@ export function postPose() {
   const orientation = quatToEuler(data.qpos[3], data.qpos[4], data.qpos[5], data.qpos[6]);
   const forwardSpeedInstantaneous = data.qvel[0] * Math.cos(orientation.yaw) + data.qvel[1] * Math.sin(orientation.yaw);
   postMessage({ type: 'pose', time: data.time, xpos, xquat, base: [data.qpos[0], data.qpos[1], data.qpos[2]], orientation,
-    velocity: [data.qvel[0], data.qvel[1], data.qvel[2]], forwardSpeed: filteredForwardSpeed, forwardSpeedInstantaneous,
+    velocity: [data.qvel[0], data.qvel[1], data.qvel[2]], forwardSpeed: filteredForwardSpeed, forwardSpeedInstantaneous, perception,
     forwardServoAcceleration, assistSpeedScale, locomotionStabilityScale,
-    mode: controller.mode, command: controller.command, requestedCommand, avoidance, navigation, reward, obstacles, fault: controller.fault }, [xpos.buffer, xquat.buffer]);
+    recovery: recovery?.stage ?? null, mode: controller.mode, command: controller.command, requestedCommand, avoidance, navigation, reward, obstacles, fault: controller.fault }, [xpos.buffer, xquat.buffer]);
 }
 
 function loop() {

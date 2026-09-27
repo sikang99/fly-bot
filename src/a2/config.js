@@ -38,6 +38,8 @@ export const A2_GAIT_PROFILE = Object.freeze({
 // Browser-preview locomotion assistance. It is deliberately separate from the
 // joint controller and must never be translated into a hardware command.
 export const VELOCITY_ASSIST_PROFILE = Object.freeze({
+  openStraightSpeed: 1.0,
+  openStraightBrakeDistance: 2.5,
   cruiseScale: 0.80,
   avoidanceScale: 0.65,
   velocityFilterTimeConstant: 0.35,

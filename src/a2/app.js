@@ -4,6 +4,9 @@ import { ARM_STOW_POSE } from './config.js';
 import { A2_FOOTPRINT } from './avoidance.js';
 import { WAYPOINT_RADIUS } from './navigation.js';
 import { worldObstacles, isTraversable, terrainColor } from './terrain.js';
+import { actorShape, actorHeading } from './dynamic.js';
+import { gamepadCommand } from './manual.js';
+import { buildJetsonBox, buildBodyBranding, renderBeacon, EquipmentBeacon } from './equipment.js';
 import './style.css';
 
 const BASE = import.meta.env.BASE_URL;
@@ -24,26 +27,48 @@ const robotCameraBasis = new THREE.Matrix4().makeBasis(
   new THREE.Vector3(-Math.cos(cameraPitch), 0, Math.sin(cameraPitch)),
 );
 robotCamera.quaternion.setFromRotationMatrix(robotCameraBasis);
+const rearCamera = robotCamera.clone();
+rearCamera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI));
+let cameraSide = 'front';
+const activeRobotCamera = () => cameraSide === 'front' ? robotCamera : rearCamera;
+for (const side of ['front', 'rear']) $(`#${side}Camera`).onclick = () => {
+  cameraSide = side;
+  for (const name of ['front', 'rear']) $(`#${name}Camera`).classList.toggle('active', name === side);
+  $('#viewDirection').textContent = `${side.toUpperCase()} · H-FOV 78° (가정)`;
+};
 let robotCameraReady = false;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0b1118');
 scene.fog = new THREE.Fog('#0b1118', 8, 25);
 const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 80);
-camera.position.set(2.6, -3.2, 2.1);
+camera.position.set(2.6, 2.1, 3.2);
 camera.layers.enable(1);
 const controls = new OrbitControls(camera, canvas);
-controls.target.set(0, 0, 0.45);
+controls.target.set(0, 0.35, 0);
 controls.enableDamping = true;
 
 scene.add(new THREE.HemisphereLight('#d9edff', '#18202a', 1.7));
 const sun = new THREE.DirectionalLight('#fff3dc', 3.2);
-sun.position.set(4, -4, 7); sun.castShadow = true;
+sun.position.set(4, 7, 4); sun.castShadow = true;
 Object.assign(sun.shadow.camera, { left: -5, right: 5, top: 5, bottom: -5, near: 0.1, far: 20 });
 scene.add(sun);
 const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStandardMaterial({ color: '#252d35', roughness: 0.9, metalness: 0.05 }));
 floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
 const grid = new THREE.GridHelper(20, 40, '#557086', '#344451'); grid.position.y = 0.002; scene.add(grid);
 const robot = new THREE.Group(); robot.rotation.x = -Math.PI / 2; scene.add(robot);
+const jetson = buildJetsonBox();
+const equipmentBeacon = new EquipmentBeacon();
+const brandCanvas = document.createElement('canvas');
+brandCanvas.width = 1024; brandCanvas.height = 192;
+const brandContext = brandCanvas.getContext('2d');
+brandContext.fillStyle = '#142331'; brandContext.fillRect(0, 0, 1024, 192);
+brandContext.font = 'bold 142px Arial, sans-serif';
+brandContext.textAlign = 'center'; brandContext.textBaseline = 'middle';
+brandContext.fillStyle = '#ffffff'; brandContext.fillText('TeamGRIT', 512, 100);
+const brandTexture = new THREE.CanvasTexture(brandCanvas);
+brandTexture.colorSpace = THREE.SRGBColorSpace;
+brandTexture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const bodyBranding = buildBodyBranding(brandTexture);
 
 const terrain = new URLSearchParams(location.search).get('terrain') || 'flat';
 const obstacleState = new Map(worldObstacles(terrain).map(obstacle => [obstacle.id, obstacle]));
@@ -51,9 +76,25 @@ const obstacleMeshes = new Map();
 function createObstacleMesh(obstacle) {
   const mesh = new THREE.Mesh(new THREE.BoxGeometry(obstacle.halfX * 2, obstacle.halfZ * 2, obstacle.halfY * 2), new THREE.MeshStandardMaterial({ color: terrainColor(obstacle), roughness: 0.62, metalness: 0.08 }));
   mesh.position.set(obstacle.x, obstacle.halfZ, -obstacle.y); mesh.castShadow = mesh.receiveShadow = true;
+  mesh.rotation.y = actorHeading(obstacle);
   mesh.userData.obstacleId = obstacle.id;
   mesh.userData.movable = obstacle.movable;
   mesh.userData.shape = `${obstacle.halfX},${obstacle.halfY},${obstacle.halfZ}`;
+  if (obstacle.kind === 'person') {
+    mesh.material.transparent = true; mesh.material.opacity = 0.18;
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(obstacle.halfX * 0.7, obstacle.halfX * 0.8, obstacle.halfZ, 12), new THREE.MeshStandardMaterial({ color: '#49b7ef' }));
+    torso.name = 'person_torso'; mesh.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(Math.min(obstacle.halfX, obstacle.halfZ * 0.23), 12, 10), new THREE.MeshStandardMaterial({ color: '#f1c49b' }));
+    head.position.y = obstacle.halfZ * 0.72; mesh.add(head);
+    for (const sign of [-1, 1]) { const leg = new THREE.Mesh(new THREE.BoxGeometry(obstacle.halfX * 0.45, obstacle.halfZ * 0.7, obstacle.halfY), new THREE.MeshStandardMaterial({ color: '#24394d' })); leg.position.set(sign * obstacle.halfX * 0.45, -obstacle.halfZ * 0.6, 0); mesh.add(leg); }
+  } else if (obstacle.kind === 'car') {
+    mesh.material.color.set('#e6c347');
+    const front = new THREE.Mesh(new THREE.BoxGeometry(0.04, obstacle.halfZ * 0.25, obstacle.halfY * 1.5), new THREE.MeshStandardMaterial({ color: '#fff5bf', emissive: '#594f2a' }));
+    front.position.x = obstacle.halfX + 0.01; mesh.add(front);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(obstacle.halfX, obstacle.halfZ * 0.6, obstacle.halfY * 1.5), new THREE.MeshStandardMaterial({ color: '#244458' }));
+    cabin.position.y = obstacle.halfZ * 0.3; mesh.add(cabin);
+    for (const x of [-1, 1]) for (const z of [-1, 1]) { const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 0.12, 12), new THREE.MeshStandardMaterial({ color: '#161a20' })); wheel.rotation.x = Math.PI / 2; wheel.position.set(x * obstacle.halfX * 0.65, -obstacle.halfZ * 0.7, z * obstacle.halfY); mesh.add(wheel); }
+  }
   const ring = new THREE.Mesh(new THREE.RingGeometry(0.48, 0.50, 48), new THREE.MeshBasicMaterial({ color: '#ffb341', transparent: true, opacity: 0.35, side: THREE.DoubleSide }));
   ring.rotation.x = -Math.PI / 2; ring.position.y = -obstacle.halfZ + 0.004; mesh.add(ring);
   scene.add(mesh); obstacleMeshes.set(obstacle.id, mesh);
@@ -62,6 +103,7 @@ for (const obstacle of obstacleState.values()) createObstacleMesh(obstacle);
 
 function syncObstacles(objects) {
   const ids = new Set(objects.map(o => o.id));
+  if (selectedObstacle && !ids.has(selectedObstacle)) { selectedObstacle = null; editorPending = true; }
   for (const [id, mesh] of obstacleMeshes) {
     const o = objects.find(item => item.id === id);
     if (!ids.has(id) || mesh.userData.shape !== `${o.halfX},${o.halfY},${o.halfZ}`) {
@@ -132,7 +174,7 @@ function partFor(name) {
     const nose = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.27, 0.12), dark); nose.position.x = 0.35; group.add(nose);
     const frontArrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(0.38, 0, 0.15), 0.34, '#65e5a5', 0.12, 0.07);
     frontArrow.traverse(object => object.layers.set(1));
-    group.add(frontArrow, buildRobotArm());
+    group.add(frontArrow, buildRobotArm(), jetson.group, bodyBranding);
   } else if (name.endsWith('_hip')) {
     mesh = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 0.16, 18), accent); mesh.rotation.x = Math.PI / 2;
   } else if (name.endsWith('_thigh')) {
@@ -147,6 +189,7 @@ function partFor(name) {
 }
 
 const worker = new Worker(new URL('./a2.worker.js', import.meta.url), { type: 'module' });
+let manualMode = false, manualStopped = false, lastManualSend = 0, hadGamepad = false;
 let bodyNames = [], ready = false, lastPose = null, following = true, editorPending = false;
 
 worker.onmessage = ({ data }) => {
@@ -156,17 +199,22 @@ worker.onmessage = ({ data }) => {
       const part = partFor(name); if (!part.children.length) continue;
       bodyGroups.set(name, part); robot.add(part);
       if (name === 'base_link') {
-        part.add(sensorCone, robotCamera); robotCamera.position.set(0.43, 0, 0.18); robotCameraReady = true;
+        part.add(sensorCone, robotCamera, rearCamera); robotCamera.position.set(0.43, 0, 0.18);
+        rearCamera.position.set(-0.36, 0, 0.08); robotCameraReady = true;
       }
     }
     ready = true; $('#status').textContent = 'READY'; $('#status').className = 'ok'; worker.postMessage({ type: 'run' });
   } else if (data.type === 'pose') {
     lastPose = data;
+    equipmentBeacon.receive(data, performance.now() / 1000);
     syncObstacles(data.obstacles || []);
     for (const obstacle of data.obstacles || []) {
       obstacleState.set(obstacle.id, { ...obstacle });
       const mesh = obstacleMeshes.get(obstacle.id);
-      if (mesh) mesh.position.set(obstacle.x, obstacle.halfZ, -obstacle.y);
+      if (mesh) { mesh.position.set(obstacle.x, obstacle.halfZ, -obstacle.y); mesh.rotation.y = actorHeading(obstacle); }
+      const torso = mesh?.getObjectByName('person_torso');
+      if (torso) torso.material.color.set(obstacle.yielding === 'waiting' ? '#ffc857'
+        : ['sidestep', 'returning'].includes(obstacle.yielding) ? '#52e3bd' : '#49b7ef');
     }
     bodyNames.forEach((name, i) => {
       const part = bodyGroups.get(name); if (!part) return;
@@ -183,12 +231,14 @@ worker.onmessage = ({ data }) => {
       pathAttribute.needsUpdate = true; pathGeometry.setDrawRange(0, pathPoints.length);
     }
   } else if (data.type === 'worldChanged') {
-    bodyNames = data.bodyNames; selectedObstacle = data.selectedId;
-    $('#editStatus').textContent = '변경 완료 · Stand로 정지했습니다. Walk로 재개하세요.';
+    bodyNames = data.bodyNames;
+    if (!data.automatic) { selectedObstacle = data.selectedId; $('#editStatus').textContent = '변경 완료 · Stand로 정지했습니다. Walk로 재개하세요.'; }
     editorPending = true;
   } else if (data.type === 'editError') {
+    equipmentBeacon.event('장애물 편집 거부', performance.now() / 1000);
     $('#editStatus').textContent = data.message;
   } else if (data.type === 'waypoint' && data.event === 'reached') {
+    equipmentBeacon.event('경로점 도착', performance.now() / 1000);
     const reached = waypoints.find(waypoint => !waypoint.reached
       && Math.hypot(waypoint.x - data.waypoint.x, waypoint.y - data.waypoint.y) < 0.01)
       || waypoints.find(waypoint => !waypoint.reached);
@@ -197,7 +247,7 @@ worker.onmessage = ({ data }) => {
   }
 };
 
-worker.onerror = event => { $('#status').textContent = 'ERROR'; $('#status').className = 'fault'; $('#fault').textContent = event.message; };
+worker.onerror = event => { equipmentBeacon.error = event.message || 'worker 오류'; $('#status').textContent = 'ERROR'; $('#status').className = 'fault'; $('#fault').textContent = event.message; };
 
 async function boot() {
   const xml = await fetch(`${BASE}a2/a2.xml`).then(response => {
@@ -214,6 +264,7 @@ function command() {
 }
 
 function sendCommand() {
+  if (manualMode) return;
   const value = command(); worker.postMessage({ type: 'command', command: value, avoidance: $('#avoidanceEnabled').checked });
   $('#vxValue').textContent = value.vx.toFixed(2); $('#vyValue').textContent = value.vy.toFixed(2);
   $('#yawValue').textContent = value.yawRate.toFixed(2); $('#frequencyValue').textContent = value.frequency.toFixed(1);
@@ -242,6 +293,7 @@ $('#resetObstacle').onclick = () => {
   selectedObstacle = null; updateObstacleState(); populateObstacleEditor();
 };
 $('#avoidanceEnabled').onchange = sendCommand;
+$('#personYield').onchange = () => worker.postMessage({ type: 'personYield', enabled: $('#personYield').checked });
 $('#clearWaypoints').onclick = clearWaypoints;
 $('#follow').onchange = event => { following = event.target.checked; };
 
@@ -250,7 +302,7 @@ const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), groundHit = 
 let pointerDown = null, draggingObstacle = null, selectedObstacle = null, dragSurface = null;
 addEventListener('pointerdown', event => {
   if (event.target !== canvas && event.target !== robotViewCanvas) return;
-  const viewCamera = event.target === robotViewCanvas ? robotCamera : camera;
+  const viewCamera = event.target === robotViewCanvas ? activeRobotCamera() : camera;
   setPointerRay(event.clientX, event.clientY, event.target, viewCamera);
   const hit = raycaster.intersectObjects([...obstacleMeshes.values()], false)[0];
   if (hit) {
@@ -354,6 +406,14 @@ function submitObstacleEdit(action) {
 $('#createObstacle').onclick = () => submitObstacleEdit('create');
 $('#resizeObstacle').onclick = () => submitObstacleEdit('resize');
 $('#deleteObstacle').onclick = () => submitObstacleEdit('delete');
+$('#obstacleKind').onchange = () => {
+  const kind = $('#obstacleKind').value;
+  if (kind === 'person' || kind === 'car') {
+    const o = actorShape(kind); $('#obstacleWidth').value = o.halfX * 2; $('#obstacleDepth').value = o.halfY * 2; $('#obstacleHeight').value = o.halfZ * 2;
+  }
+};
+$('#randomActors').onchange = event => worker.postMessage({ type: 'randomActors', enabled: event.target.checked });
+$('#autoRecover').onchange = event => worker.postMessage({ type: 'autoRecover', enabled: event.target.checked });
 
 function clearWaypoints() {
   waypoints.length = 0; rebuildWaypoints(); worker.postMessage({ type: 'clearWaypoints' });
@@ -400,18 +460,81 @@ function updateFootprint(base, bodyYaw) {
 
 const keyState = new Set();
 addEventListener('keydown', event => {
+  if (event.code === 'Space') { event.preventDefault(); emergencyStop(); return; }
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName)) return;
   keyState.add(event.code);
-  if (event.code === 'Space') { event.preventDefault(); worker.postMessage({ type: 'mode', mode: 'passive' }); }
+  if (manualMode) return;
   updateKeys();
 });
 addEventListener('keyup', event => { keyState.delete(event.code); updateKeys(); });
 function updateKeys() {
+  if (manualMode) return;
   $('#vx').value = keyState.has('KeyW') ? 0.6 : keyState.has('KeyS') ? -0.4 : 0;
   $('#yaw').value = keyState.has('KeyA') ? 0.35 : keyState.has('KeyD') ? -0.35 : 0;
   sendCommand();
 }
 
+function emergencyStop() {
+  equipmentBeacon.event('긴급 정지', performance.now() / 1000);
+  manualStopped = true; keyState.clear(); worker.postMessage({ type: 'emergencyStop' });
+  $('#manualStatus').textContent = '비상 정지 · Manual Mode 버튼을 다시 눌러 재활성화하세요.';
+}
+function setManualMode(enabled) {
+  manualMode = enabled; manualStopped = false; hadGamepad = false; keyState.clear();
+  worker.postMessage({ type: 'manualMode', enabled });
+  for (const id of ['demo', 'fastWalk', 'vx', 'vy', 'yaw']) $(`#${id}`).disabled = enabled;
+  for (const button of document.querySelectorAll('[data-mode]')) button.disabled = false;
+  $('#manualMode').classList.toggle('active', enabled);
+  $('#manualStatus').textContent = enabled ? '수동 · Walk 선택 후 RB/Shift를 놓았다 누르고 조종하세요.' : '자동 모드 · Walk를 눌러 경로를 재개하세요.';
+}
+$('#manualMode').onclick = () => setManualMode(true);
+$('#automaticMode').onclick = () => setManualMode(false);
+$('#emergencyStop').onclick = emergencyStop;
+addEventListener('blur', () => { if (manualMode) emergencyStop(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && manualMode) emergencyStop(); });
+addEventListener('gamepaddisconnected', () => { if (manualMode) emergencyStop(); });
+function pollManual() {
+  if (!ready || performance.now() - lastManualSend < 50) return;
+  lastManualSend = performance.now();
+  const pad = Array.from(navigator.getGamepads?.() || []).find(p => p?.connected);
+  if (pad?.mapping === 'standard' && pad.buttons[1]?.pressed) { emergencyStop(); return; }
+  if (!manualMode || manualStopped) return;
+  if (hadGamepad && !pad) { emergencyStop(); return; }
+  hadGamepad = !!pad;
+  let input;
+  if (pad) {
+    if (pad.mapping !== 'standard') { $('#manualStatus').textContent = '비표준 조종기: 매핑 설정 필요 · 키보드 사용 시 조종기를 분리하세요.'; worker.postMessage({ type: 'manualCommand', held: false, command: {} }); return; }
+    input = gamepadCommand(pad);
+    $('#manualStatus').textContent = `${pad.id} · Walk 선택 후 RB를 놓았다 누르고 조종`;
+  } else {
+    input = { held: keyState.has('ShiftLeft') || keyState.has('ShiftRight'), command: {
+      vx: (Number(keyState.has('KeyW')) - Number(keyState.has('KeyS'))) * .6,
+      vy: (Number(keyState.has('KeyQ')) - Number(keyState.has('KeyE'))) * .35,
+      yawRate: (Number(keyState.has('KeyA')) - Number(keyState.has('KeyD'))) * .35 } };
+    $('#manualStatus').textContent = 'Walk 선택 후 Shift를 놓았다 누르고 W/S 전후, A/D 회전, Q/E 옆걸음';
+  }
+  if (input.emergency) { emergencyStop(); return; }
+  worker.postMessage({ type: 'manualCommand', ...input });
+}
+
 function renderTelemetry(data) {
+  const people = (data.obstacles || []).filter(o => o.kind === 'person');
+  $('#pedestrianState').textContent = `양보 ${people.filter(o => o.yielding === 'sidestep').length} · 복귀 ${people.filter(o => o.yielding === 'returning').length} · 대기 ${people.filter(o => o.yielding === 'waiting').length}`;
+  $('#perceptionHealth').textContent = data.perception?.health === 'ok' ? '가상 센서 입력 정상 · 위험 추적 10Hz'
+    : data.perception?.health === 'degraded' ? '영상 입력 누락/지연 · 거리만 사용'
+      : '센서 입력 불명 · 안전한 공간으로 판단하지 않음';
+  for (const side of ['front', 'rear']) {
+    const risk = data.perception?.[side];
+    const status = { clear: '여유', near: '근접', warning: '접근 위험', critical: '충돌 임박', unknown: '입력 불명' }[risk?.level] || '초기화';
+    $(`#${side}Risk`).textContent = `${side === 'front' ? '전방' : '후방'}: ${status}`
+      + (risk?.clearance != null ? ` · ${risk.clearance.toFixed(2)}m` : '')
+      + (risk?.ttc != null ? ` · TTC ${risk.ttc.toFixed(1)}s` : '')
+      + (risk?.kind && risk.kind !== 'unknown' ? ` · ${risk.kind}` : '');
+    $(`#${side}Risk`).className = risk?.level === 'critical' ? 'fault' : risk?.level === 'warning' ? 'avoid' : '';
+  }
+  $('#recoveryState').textContent = data.recovery === 'waiting' ? '복구 대기 · 주변 장애물이 지나갈 때까지 정지'
+    : data.recovery ? '시뮬레이션 자세 보조 복구 중 · 실제 관절 자력 기상 아님'
+      : '옆넘어짐 시 주변 공간 확보 후 3초 자세 보조 · 최대 2회 · Passive로 취소';
   $('#mode').textContent = data.mode.toUpperCase();
   document.querySelectorAll('[data-mode]').forEach(item => item.classList.toggle('active', item.dataset.mode === data.mode));
   $('#time').textContent = data.time.toFixed(1);
@@ -426,7 +549,7 @@ function renderTelemetry(data) {
   $('#fault').className = data.fault ? 'fault' : '';
   const avoiding = data.avoidance?.active;
   $('#avoidanceState').textContent = avoiding
-    ? data.avoidance.strategy?.startsWith('passage')
+    ? data.avoidance.strategy === 'dynamic-escape' ? '후방 접근 · 전진 탈출' : data.avoidance.strategy === 'dynamic-wait' ? '이동 장애물 대기' : data.avoidance.strategy?.startsWith('passage')
       ? ({ passage: '통로 직진', 'passage-align': '통로 방향 정렬', 'passage-retreat': '회전 공간 확보', 'passage-blocked': '통로 여유 부족 · 정지' })[data.avoidance.strategy]
       : `${data.avoidance.strategy === 'docking' ? 'DOCKING' : data.avoidance.strategy === 'bypass' ? 'BYPASS' : data.avoidance.strategy === 'arc' ? 'ARC' : 'SIDESTEP'} ${data.avoidance.direction > 0 ? 'LEFT' : 'RIGHT'}` : data.navigation.blocked ? 'GOAL BLOCKED' : 'CLEAR';
   $('#avoidanceState').className = avoiding ? 'avoid' : '';
@@ -447,8 +570,8 @@ function renderTelemetry(data) {
     const glow = id === draggingObstacle ? '#7a4300' : id === selectedObstacle ? '#402600' : id === data.avoidance?.obstacle && avoiding ? '#6b2500' : '#000000';
     mesh.material.emissive.set(glow);
   }
-  const nearest = Math.min(...[...obstacleState.values()].map(obstacle => Math.max(0, Math.hypot(data.base[0] - obstacle.x, data.base[1] - obstacle.y) - Math.hypot(obstacle.halfX, obstacle.halfY))));
-  $('#viewRange').textContent = `LiDAR ${nearest.toFixed(2)}m`;
+  const clearance = data.perception?.[cameraSide]?.clearance;
+  $('#viewRange').textContent = clearance == null ? 'SIM 여유거리 --' : `SIM 여유거리 ${clearance.toFixed(2)}m`;
   $('#viewMode').textContent = rewardRecent ? `REWARD +${data.reward.lastValue}` : avoiding ? 'AVOIDING'
     : data.navigation?.recovering ? 'REALIGNING' : data.navigation?.active ? 'TRACKING' : data.mode.toUpperCase();
 }
@@ -459,21 +582,30 @@ function resize() {
   camera.aspect = width / height; camera.updateProjectionMatrix();
   const viewWidth = robotViewCanvas.clientWidth, viewHeight = robotViewCanvas.clientHeight;
   robotRenderer.setPixelRatio(Math.min(devicePixelRatio, 1.5)); robotRenderer.setSize(viewWidth, viewHeight, false);
-  robotCamera.aspect = viewWidth / viewHeight; robotCamera.updateProjectionMatrix();
+  robotCamera.aspect = viewWidth / viewHeight;
+  robotCamera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(39)) / robotCamera.aspect));
+  robotCamera.updateProjectionMatrix();
+  rearCamera.aspect = robotCamera.aspect; rearCamera.fov = robotCamera.fov; rearCamera.updateProjectionMatrix();
 }
 addEventListener('resize', resize); resize();
 
 function animate() {
   requestAnimationFrame(animate);
+  pollManual();
+  const beacon = equipmentBeacon.sample(performance.now() / 1000, { ready, stopped: manualMode && manualStopped });
+  renderBeacon(jetson.lamps, beacon);
+  $('#beaconState').textContent = beacon.label;
+  $('#beaconState').dataset.state = beacon.mode;
+  $('#beaconState').className = beacon.mode === 'error' ? 'fault' : beacon.mode === 'event' ? 'avoid' : '';
   if (following && lastPose) {
     const target = new THREE.Vector3(lastPose.base[0], 0.45, -lastPose.base[1]);
     controls.target.lerp(target, 0.05);
   }
   controls.update(); renderer.render(scene, camera);
-  if (robotCameraReady) robotRenderer.render(scene, robotCamera);
+  if (robotCameraReady) robotRenderer.render(scene, activeRobotCamera());
 }
 
-boot().catch(error => { $('#status').textContent = 'LOAD FAILED'; $('#status').className = 'fault'; $('#fault').textContent = error.message; });
+boot().catch(error => { equipmentBeacon.error = error.message; $('#status').textContent = 'LOAD FAILED'; $('#status').className = 'fault'; $('#fault').textContent = error.message; });
 window.__a2 = {
   worker, addWaypointFromScreen, moveObstacle,
   obstacleScreen(id) {

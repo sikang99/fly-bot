@@ -13,30 +13,43 @@
     <div id="status" class="status">LOADING MODEL</div>
   </header>
   <aside id="visionPanel" class="vision-panel">
-    <header><strong>A2 CAMERA</strong><span id="viewMode">STANDBY</span></header>
+    <header><strong>A2 PRO CAMERA · SIM</strong><span id="viewMode">STANDBY</span></header>
+    <div class="row camera-switch"><button id="frontCamera" class="active">전방 시야</button><button id="rearCamera">후방 시야</button></div>
     <div class="view-frame">
       <canvas id="robotView"></canvas>
       <i class="reticle horizontal"></i><i class="reticle vertical"></i>
-      <div class="view-hud"><span>FOV 78°</span><span id="viewRange">LiDAR --</span></div>
+      <div class="view-hud"><span id="viewDirection">FRONT · H-FOV 78° (가정)</span><span id="viewRange">SIM 여유거리 --</span></div>
     </div>
+    <div class="risk-summary"><div id="frontRisk">전방: 초기화</div><div id="rearRisk">후방: 초기화</div></div>
+    <div id="perceptionHealth" class="hint">센서 입력 초기화</div>
+    <p class="hint">SIM / SHADOW: 가상 객체·거리 입력으로 위험 추적 검증 중. 실제 영상 AI·LiDAR 드라이버 미연결. 신규 위험 추적은 표시 전용이며 기존 회피기가 주행합니다.</p>
   </aside>
   <aside class="panel">
-    <h1>Unitree A2 기본 보행</h1>
+    <h1>Unitree A2 Pro 기본 보행</h1>
     <div class="muted">공식 A2 물성 기반 MuJoCo 시뮬레이션</div>
 
     <h2>Operation mode</h2>
+    <div class="row"><button id="manualMode">Manual Mode / 재활성화</button><button id="automaticMode">Auto Mode</button></div>
+    <button id="emergencyStop" class="danger">긴급 정지 (Space / B)</button>
+    <p id="manualStatus" class="hint" aria-live="polite">USB/Bluetooth 표준 게임패드: 왼쪽 스틱 전후·옆걸음, 오른쪽 스틱 좌우 회전. RB를 누르는 동안만 이동. 조종기의 버튼을 눌러 연결을 인식시키세요.</p>
+    <p class="hint">Manual은 경로·자동회피·자동기립을 중단합니다. 전도 보호는 유지됩니다. 실제 A2 원격조종 연결이 아닌 브라우저 시뮬레이터 조종입니다.</p>
     <div class="modes">
       <button data-mode="passive" class="danger">Passive</button>
       <button data-mode="stand" class="active">Stand</button>
       <button data-mode="walk">Walk</button>
     </div>
-    <div class="row"><button id="demo" class="demo">▶ Obstacle avoidance demo</button><button id="fastWalk">▶ Stable cruise +X</button></div>
+    <div class="row"><button id="demo" class="demo">▶ Obstacle avoidance demo</button><button id="fastWalk">▶ 직선 순항 1m/s</button></div>
     <div class="row"><button id="clearWaypoints">Clear waypoints</button><button id="resetObstacle">Reset obstacles</button></div>
     <p><span style="color:#36c98f">■ 초록: 단차 높이 2cm 이하 · 통과</span><br><span style="color:#ef694e">■ 주홍: 2cm 초과 단차 / 상자 · 회피</span><br>단차·상자를 클릭하여 선택하고 드래그하여 이동합니다. 통과 기준은 시뮬레이터 전용입니다.</p>
     <p class="hint">녹색 화살표와 A2 카메라 방향이 전방(+X) · vx &gt; 0 전진 · 바닥 클릭: 경로점 추가 · 몸체 중심이 경로점 위에 오면 도착</p>
 
     <h2>장애물 편집</h2>
-    <label>생성 종류 <select id="obstacleKind"><option value="box">상자</option><option value="step">단차</option></select></label>
+    <label><input id="personYield" type="checkbox" checked> 사람이 로봇을 만나면 살짝 양보</label>
+    <p id="pedestrianState" class="hint">양보 0 · 복귀 0 · 대기 0</p>
+    <p class="hint">사람은 옆으로 비킨 뒤 원래 경로로 복귀합니다. 공간이 없으면 기다립니다. 해제하면 기존 직진 장애물로 시험합니다. 실제 사람의 양보를 보장하지 않습니다.</p>
+    <label>생성 종류 <select id="obstacleKind"><option value="box">상자</option><option value="step">단차</option><option value="person">사람 (0.6m/s)</option><option value="car">자동차 (1.2m/s)</option></select></label>
+    <label><input id="randomActors" type="checkbox">10m 이상 경로 · 무작위 횡단 출현</label>
+    <p class="hint">자동 출현은 8–14초 간격으로 경로 앞쪽 옆에서 생성하고 12초 후 제거합니다. 수동 생성은 Y방향 왕복 이동합니다. 자동 출현은 주행을 유지합니다.</p>
     <label>가로 X (m) <input id="obstacleWidth" type="number" min="0.1" max="4" step="0.01" value="0.6" required></label>
     <label>세로 Y (m) <input id="obstacleDepth" type="number" min="0.1" max="4" step="0.01" value="0.6" required></label>
     <label>높이 (m) <input id="obstacleHeight" type="number" min="0.01" max="2" step="0.01" value="0.3" required></label>
@@ -44,11 +57,14 @@
     <button id="deleteObstacle" class="danger" disabled>선택 장애물 삭제</button>
     <p id="editStatus" aria-live="polite">화면에서 장애물을 선택하세요. 생성은 로봇에서 X/Y 각각 +2m 위치, 편집 시 Stand 정지. 최대 32개. 새로고침 시 초기화됩니다.</p>
     <h2>Velocity command</h2>
+    <p class="hint">관절 보행 명령 상한은 0.6 유지 · 열린 직선 구간에서는 위치 보조로 실측 약 1m/s. 목표·장애물 2.5m 전부터 감속합니다. 실제 로봇 제어값이 아닙니다.</p>
     <div class="control"><label>전진 속도 vx <b id="vxValue">0.00</b></label><input id="vx" type="range" min="-0.6" max="0.6" value="0" step="0.05"></div>
     <div class="control"><label>측면 속도 vy <b id="vyValue">0.00</b></label><input id="vy" type="range" min="-0.35" max="0.35" value="0" step="0.05"></div>
     <div class="control"><label>회전 속도 yaw <b id="yawValue">0.00</b></label><input id="yaw" type="range" min="-0.35" max="0.35" value="0" step="0.05"></div>
     <div class="control"><label>보행 주파수 Hz (안정 고정) <b id="frequencyValue">1.4</b></label><input id="frequency" type="range" min="1.4" max="1.4" value="1.4" step="0.1" disabled></div>
 
+    <label><input id="autoRecover" type="checkbox" checked>옆으로 넘어지면 자세 보조 복구 (시뮬레이션)</label>
+    <p id="recoveryState" class="hint">실제 관절 자력 기상이 아닌 3초 자세 보조입니다. 주변 공간 확보 후 최대 2회 시도하며 Passive로 취소합니다.</p>
     <h2>Telemetry</h2>
     <div class="telemetry">
       <div class="metric"><b id="mode">PASSIVE</b><span>mode</span></div>
@@ -67,7 +83,10 @@
       <div class="metric"><b id="obstacleState">NONE</b><span>selected obstacle</span></div>
       <div class="metric"><b id="footprintState">1.12 × 0.84m</b><span>swept footprint / clearance</span></div>
       <div class="metric"><b class="complete">4-DOF STOWED</b><span>single arm prototype</span></div>
+      <div class="metric"><b>ORIN NX 16GB</b><span>rear-mounted Jetson · visual prototype</span></div>
+      <div class="metric"><b id="beaconState">초기화 · 소등</b><span>적녹 경광등 · 오류 우선</span></div>
     </div>
+    <p class="hint">후방 Jetson 박스·경광등: 이동 시 적녹 교대, 이벤트 시 적색 점멸(3초), 오류 시 적색 고정. 대기 시 소등. 박스 질량·충돌은 아직 물리에 반영되지 않습니다.</p>
     <div class="row"><button id="reset">Reset simulation</button><label><input id="follow" type="checkbox" checked> follow</label><label><input id="avoidanceEnabled" type="checkbox" checked> avoid</label></div>
     <p class="hint">W/S 전후 이동 · A/D 회전 · Space 즉시 Passive. 실제 A2에는 이 브라우저의 관절 토크를 직접 전송하지 않습니다.</p>
   </aside>

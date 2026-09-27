@@ -1,5 +1,6 @@
 import { A2_OBSTACLES, sanitizeCommand } from './config.js';
 import { isTraversable } from './terrain.js';
+import { actorHeading, obstacleWorldBounds } from './dynamic.js';
 
 // Includes the body, hips and the normal foot sweep, not just base_link.
 export const A2_FOOTPRINT = Object.freeze({ halfLength: 0.46, halfWidth: 0.32, margin: 0.10, bypassMargin: 0.08, lookAhead: 1.65 });
@@ -8,7 +9,7 @@ export function obstacleRelativeGeometry(pose, obstacle) {
   const dx = obstacle.x - pose.x, dy = obstacle.y - pose.y;
   const forward = Math.cos(pose.yaw) * dx + Math.sin(pose.yaw) * dy;
   const lateral = -Math.sin(pose.yaw) * dx + Math.cos(pose.yaw) * dy;
-  const c = Math.abs(Math.cos(pose.yaw)), s = Math.abs(Math.sin(pose.yaw));
+  const c = Math.abs(Math.cos(pose.yaw - actorHeading(obstacle))), s = Math.abs(Math.sin(pose.yaw - actorHeading(obstacle)));
   const obstacleForwardRadius = c * obstacle.halfX + s * obstacle.halfY;
   const obstacleLateralRadius = s * obstacle.halfX + c * obstacle.halfY;
   const clearance = forward - obstacleForwardRadius - A2_FOOTPRINT.halfLength - A2_FOOTPRINT.margin;
@@ -21,7 +22,7 @@ export function obstacleRelativeGeometry(pose, obstacle) {
 // detour only when the complete route to the current target is unobstructed.
 export function waypointRouteClear(pose, target, obstacles, fixedYaw = null) {
   const radius = Math.hypot(A2_FOOTPRINT.halfLength, A2_FOOTPRINT.halfWidth) + A2_FOOTPRINT.margin;
-  return obstacles.filter(o => !isTraversable(o)).every(o => {
+  return obstacles.filter(o => !isTraversable(o)).map(obstacleWorldBounds).every(o => {
     let lo = 0, hi = 1;
     for (const [axis, half] of [['x', o.halfX], ['y', o.halfY]]) {
       const delta = target[axis] - pose[axis];
@@ -60,7 +61,7 @@ export function planObstacleAvoidance(pose, requested, obstacles = A2_OBSTACLES,
   for (const obstacle of obstacles) {
     if (isTraversable(obstacle)) continue;
     const { forward, lateral, clearance, lateralClearance, behind } = obstacleRelativeGeometry(pose, obstacle);
-    const c = Math.abs(Math.cos(pose.yaw)), s = Math.abs(Math.sin(pose.yaw));
+    const c = Math.abs(Math.cos(pose.yaw - actorHeading(obstacle))), s = Math.abs(Math.sin(pose.yaw - actorHeading(obstacle)));
     const obstacleForwardRadius = c * obstacle.halfX + s * obstacle.halfY;
     const ahead = forward + obstacleForwardRadius > 0.10;
     const blocked = ahead && !behind && forward - obstacleForwardRadius < A2_FOOTPRINT.lookAhead && lateralClearance < A2_FOOTPRINT.bypassMargin;
@@ -76,8 +77,8 @@ export function planObstacleAvoidance(pose, requested, obstacles = A2_OBSTACLES,
   if (target) {
     // Prefer the side whose clearance point has the shortest remaining route,
     // rather than choosing a side solely from the obstacle's tiny offset.
-    const sideRadius = Math.abs(Math.sin(pose.yaw)) * nearest.obstacle.halfX
-      + Math.abs(Math.cos(pose.yaw)) * nearest.obstacle.halfY
+    const sideRadius = Math.abs(Math.sin(pose.yaw - actorHeading(nearest.obstacle))) * nearest.obstacle.halfX
+      + Math.abs(Math.cos(pose.yaw - actorHeading(nearest.obstacle))) * nearest.obstacle.halfY
       + A2_FOOTPRINT.halfWidth + A2_FOOTPRINT.margin + A2_FOOTPRINT.bypassMargin;
     const cost = sign => {
       const shift = nearest.lateral + sign * sideRadius;

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "robot": "unitree_a2",
+  "action_type": "body_velocity",
+  "frame": "body_x_forward_y_left_z_up",
+  "simulation_assistance": false,
+  "normalization": "embedded_in_onnx",
+  "training_run": "REPLACE_WITH_REAL_TRAINING_RUN",
+  "input_name": "observation",
+  "output_name": "action",
+  "observations": [
+    {"name": "goal_forward", "unit": "m"},
+    {"name": "goal_left", "unit": "m"},
+    {"name": "velocity_forward", "unit": "m/s"},
+    {"name": "velocity_left", "unit": "m/s"},
+    {"name": "yaw_rate", "unit": "rad/s"},
+    {"name": "clearance_front", "unit": "m"},
+    {"name": "clearance_left", "unit": "m"},
+    {"name": "clearance_right", "unit": "m"}
+  ],
+  "outputs": ["vx_m_s", "vy_m_s", "yaw_rad_s"],
+  "max_inference_ms": 20,
+  "atol": 0.0001
+}

@@ -1,5 +1,6 @@
 import { A2_FOOTPRINT, waypointRouteClear } from './avoidance.js';
 import { isTraversable } from './terrain.js';
+import { isDynamic } from './dynamic.js';
 import { clamp, sanitizeCommand } from './config.js';
 
 function rotationClear(pose, heading, obstacles) {
@@ -14,7 +15,7 @@ function rotationClear(pose, heading, obstacles) {
 // along the overlap, with the normal swept-footprint clearance intact.
 export function planPassage(pose, target, obstacles) {
   if (!target || Math.hypot(target.x - pose.x, target.y - pose.y) < 0.45) return null;
-  const solid = obstacles.filter(o => !isTraversable(o));
+  const solid = obstacles.filter(o => !isTraversable(o) && !isDynamic(o));
   const passages = [];
   for (let i = 0; i < solid.length; i++) for (let j = i + 1; j < solid.length; j++) {
     for (const axis of ['x', 'y']) {

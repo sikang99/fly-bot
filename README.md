@@ -11,6 +11,12 @@ Open [a2.html](a2.html). The application provides passive, standing and diagonal
 
 The simulator uses Unitree's official A2 MJCF properties. The original connectome viewer and fly arena remain available as research references at `index.html` and `arena.html`; they are not part of the A2 controller path.
 
+Jetson 배포 준비: [외장 Jetson 배포 안내](docs/JETSON_DEPLOYMENT.md).
+`npm run jetson:doctor`, `npm run jetson:test`, `npm run jetson:pack -- --out deploy/jetson/bundles/toolkit-001`로 시작할 수 있습니다.
+현재 A2는 규칙 기반 시뮬레이션이며 학습 완료 모델은 없습니다. 배포 도구는 기본적으로 로봇 명령을 송신하지 않습니다.
+
+A2 Pro 전후방 시야·위험 추적과 오프라인 영상 추론 어댑터: [인식 파이프라인 1단계](docs/A2_PRO_PERCEPTION.md). 시뮬레이터는 가상 객체 입력을 사용하며 실제 영상 AI/센서 연결과 구분합니다.
+
 ## Original fly-brain research environment
 
 The complete wiring diagram of a male fruit fly's nervous system is now a file: 165,122

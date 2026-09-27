@@ -4,6 +4,8 @@
 
 This repository now provides a browser-based baseline walking environment for the Unitree A2. It is intended for simulation, controller experiments and command-interface development. It is not a certified controller and must not be connected to a physical robot at joint-torque level without an independent safety review.
 
+Jetson deployment preparation is documented in [JETSON_DEPLOYMENT.md](JETSON_DEPLOYMENT.md). The current A2 path is rule-based, not a trained/exported policy; waypoint reward accounting does not train weights. The deployment tool packages optional future high-level ONNX policies, verifies offline golden replay, and manages SSH release transfers/activation/rollback without opening a robot command channel. Live sensing, command arbitration, hardware watchdog and an A2 SDK bridge are separate unimplemented gates.
+
 ## Data flow
 
 ```text
@@ -27,6 +29,12 @@ The official MJCF places `FR/FL` hips at `x=+0.25944m` and `RR/RL` hips at `x=-0
 ## Arm morphology prototype
 
 A fixed single-arm visual prototype is mounted on the `+X` front section of `base_link`, above the FL/FR leg line as shown in the morphology reference. It includes a 0.75-scale base yaw stage, shoulder, elbow, wrist and two-finger gripper. Its initial and current default is a compact pose folded rearward over the body; it remains fixed there during walking until a later manipulation controller explicitly takes ownership. The prototype follows the robot pose without changing MuJoCo mass or walking dynamics. The intended biological translation is documented in `docs/MORPHOLOGICAL_MAPPING.md`: T1 bilateral foreleg channels map to arm common/differential commands, T2 maps to FL/FR, and T3 maps to RL/RR. Physical arm inertias, joints, collision and control remain a separate implementation stage.
+
+## Rear Jetson enclosure and beacon (visual only)
+
+`equipment.js` adds an Orin NX 16GB enclosure behind the front-mounted stowed arm, on the rear upper deck. Its illustrative dimensions are 0.22 × 0.21 × 0.11m, slightly narrower than the rendered 0.24m body. Rails, cooling fins, rear ports and separate red/green beacon lenses follow `base_link`. No payload mass, inertia or collision geometry has been added; hardware dimensions and payload dynamics require measurement.
+
+Beacon priority: safety/worker/stale-telemetry error = steady red; waypoint arrival, avoidance, blocked route, recovery or emergency-stop event = red-only 2Hz blink; measured walking translation or rotation = red/green alternating every 0.5s; idle = both off. Events persist for three wall-clock seconds, refreshed while avoidance/blocked/recovery is active. Stale telemetry after one second is an error. Simulation reset clears old event timers. These are browser-rendered indicators, not Jetson GPIO or a physical beacon driver.
 
 ## Joint convention
 
@@ -101,6 +109,12 @@ A second renderer uses a 78-degree perspective camera attached to the front of `
 
 ### Navigation and avoidance ownership
 
+Rear-approach safety precedes the blanket dynamic wait: approaching actors behind the body trigger forward escape only if the static 1.5m forward corridor and sampled moving-actor trajectories are clear. Prediction uses measured current speed plus bounded acceleration; assuming a stopped robot here caused a false return to waiting during escape. Escape preserves heading and uses the preview velocity assist with up to 0.6m/s² acceleration.
+
+Optional assisted side-fall recovery is explicitly simulation-only. A walking safety fault with substantial roll latches a passive recovery state, waits for current and short-horizon occupancy to clear, then interpolates root quaternion/height and nominal joints over 3s while suspending ordinary physics stepping. It retains XY, queued goals and rewards. Afterward normal physics resumes and the route reacquires heading. This is pose assistance, not a learned or torque-driven self-righting controller. Attempts are capped at two per Reset; Passive or disabling recovery cancels it. Blocked recovery waits rather than righting into an obstacle.
+
+Open straight preview cruise now targets 1.0m/s measured speed using bounded drag compensation and velocity feedback in the translation assist. The joint gait remains limited to its previous 0.6m/s command profile. Boost requires high forward command, near-zero yaw/lateral command, no avoidance or alignment, at least 2.5m clearance ahead, and more than 2.5m remaining to a waypoint. Braking, acceleration and stability derating remain active. Near obstacles, turns, passages and docking keep their existing lower speeds. A 60s straight run measured 0.998m/s mean after the first 10s and 1.015m/s filtered peak; these are assisted preview results, not hardware performance validation.
+
 `passage.js` detects overlapping pairs of axis-aligned solid boxes with 0.86–1.35m free width. Passage control precedes docking: align the long body axis to the corridor, then translate slowly along its centre at up to 0.24m/s command. Rotation sweeps are checked at 25 headings using the conservative footprint. If rotation is unsafe, bounded fore/aft pocket searches may release room; otherwise stop and display the blocked state. This geometry heuristic supports editor-box corridors, not arbitrary maze planning. A physical-worker regression verifies a 1m-wide, 2m-long passage with lateral error under 0.1m, heading error under 0.16rad and final waypoint reward.
 
 Near-obstacle docking activates within 1.2m of a waypoint near a blocking object if translation at the current heading is clear. It uses a heading-specific conservative swept body envelope instead of the rotation envelope. Safe lateral correction takes priority, followed by bounded fore/aft correction (0.12m/s command) and lateral correction (0.22m/s command), without yaw. Existing 0.10m clearance remains. Targets inside blocking geometry are not rewarded and show GOAL BLOCKED at arrival. This is not a full narrow-space reachability solver.
@@ -125,7 +139,21 @@ Within 0.45m of a tracked waypoint, the follower holds heading and uses bounded 
 
 ## Obstacle editor
 
+People now have optional cooperative yielding (enabled by default in the UI). `pedestrian.js` preserves the intended walking line and cruise velocity separately from the actual velocity published to avoidance/perception. A short-horizon encounter prediction triggers a bounded lateral offset; the passing side stays fixed until the robot is behind or sufficiently separated. People slow while stepping aside and smoothly rejoin their original line after passing. Side choice checks other obstacles; a swept occupancy check stops the kinematic person if the next step is blocked. Cars retain their original longitudinal motion. Manual people still reverse their cruise direction every six seconds. The checkbox restores non-cooperative straight-moving people for adversarial regression tests; robot safety must never assume that real people will yield. This is a stylized kinematic social behavior, not a validated pedestrian model. Color cues: blue normal, mint yielding/returning, yellow waiting.
+
+Cars orient their local longitudinal +X axis to `atan2(vy,vx)`. Rendering and mocap collision quaternions share this heading, including manual route reversal. Avoidance uses relative oriented projections and conservative rotated world bounds; moving actors are excluded from static paired-wall passage inference. People remain unoriented. Car reversal is an instantaneous heading change in this kinematic test model, not an Ackermann steering simulation.
+
+Dynamic kinds `person` and `car` use simple visual models and box collision proxies, moving at 0.6 and 1.2m/s. Manual actors reverse on the Y axis every 6 simulation seconds. They share selection, resize and delete operations. Optional random crossings are enabled per session and only for a single waypoint segment at least 10m long (not accumulated route length). Spawn candidates are 3.5–5.5m ahead and 3m sideways, with at least 5m remaining, checked first after 2s and then every 8–14s. Overlapping candidates are skipped. Automatic actors expire after 12s; disabling the option prevents new spawns but does not freeze existing ones. Automatic model rebuilds preserve motion/route state. A short-horizon occupancy check (now, +0.5s, +1s) requests a wait when actors threaten the robot's forward corridor. This is a simulation heuristic, not certified pedestrian protection.
+
 The sidebar creates boxes or steps, resizes selected objects and deletes them. Dimensions are full metres (XY 0.1–4m, height 0.01–2m), with a 32-object cap. New objects appear at robot XY + (2,2), then can be dragged. Edits rebuild the MuJoCo model atomically to refresh collision bounds; mocap-only changes preserve joint layout, robot qpos/qvel, simulation time and waypoint queue. Locomotion enters Stand and requires Walk to resume. Rendering is reconciled from the worker's authoritative obstacle list. Step traversability/color are recalculated from height. Changes are session-only and reload restores defaults; Reset simulation retains edited objects.
+
+## Manual control
+
+Passive ↔ Stand ↔ Walk are explicitly selectable in Manual mode. Only Walk accepts movement input. Every mode change clears the previous command and requires deadman release before rearming. Ordinary Passive is reversible via the mode buttons; emergency-stop latching is separate and still requires Manual reactivation. Deadman release/watchdog expiry zeros movement without changing the selected mode (superseding the earlier automatic Stand behavior described below).
+
+`manual.js` owns deadman arming, a 300ms wall-clock input watchdog and a latched stop. The UI polls a standard-mapping Gamepad every 50ms: RB enables motion, left stick controls forward/lateral translation and right-stick X controls yaw. B or Space requests Passive emergency stop. Keyboard fallback uses Shift with W/S (forward/reverse), Q/E (lateral) and A/D (yaw). Limits are 0.6m/s forward, 0.35m/s lateral and 0.35rad/s yaw; manual control does not use automatic 1m/s preview boosting. Unsupported controller mappings are rejected rather than guessed.
+
+Manual activation cancels assisted recovery and suspends navigation/avoidance without deleting queued waypoints. Existing dynamic actors still move, but new random spawns pause. Tilt/height fault checks remain active. Deadman release or expired input selects zero-command Stand; an expired input also requires deadman release before rearming. Focus loss, hidden page and controller disconnect latch Passive. Passive means the existing simulator passive actuator mode, not a certified physical braking system. Manual reactivation clears the latch, and release of RB/Shift is required before movement. Auto Mode returns to Stand; Walk explicitly resumes the saved route. This browser implementation does not connect to A2 hardware or a proprietary Unitree remote protocol. Physical controller compatibility still requires a connected-device test.
 
 ## Sources
 
