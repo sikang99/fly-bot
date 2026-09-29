@@ -1,0 +1,61 @@
+Create a polished high-resolution Korean technical infographic poster, portrait aspect approximately 2:3, generous legible typography and organized engineering diagrams, titled "ANT : A2 + PIPER-X" with subtitle "시뮬레이션에서 실제 로봇으로 — 단계별 적용 절차". This is an implementation ROADMAP, NOT a completed deployment certification. Navy, white, teal with amber warning accents. Crisp professional publication quality, clear arrows, numbered cards, small isometric illustration of quadruped robot with folded front-mounted arm and rear top Jetson box. All text in Korean except technical proper nouns. Render text accurately, no fake tiny text. Use the following concise EXACT content, organize as an architecture band then 8 numbered stage cards in two columns and a bottom safety gate. Readability above decoration.
+
+Top amber notice: "현재: MuJoCo 보행 시뮬레이션 + 시각 팔 동작 / 커넥톰은 상태 관찰용"
+Second notice: "목표: A2 Pro + Jetson Orin NX 16GB + PiPER-X / 실물 연결·검증은 별도"
+
+Architecture band heading "실물 실행 구조"
+Draw "카메라·LiDAR·로봇 상태" feeding parallel boxes "빠른 위험 판단" and "영상 인식·경로 계획", both into "독립 안전 중재", then into two branches "A2 공식 SDK → 내장 보행기" and "PiPER-X SDK → 팔 제어".
+Add smaller dashed branch "커넥톰 행동 제안 · 향후 검증" into safety mediator only. No direct neural to joint connection.
+Separate small safety line "물리 긴급정지 · 수동 우선권 · 통신 감시". Do not imply physical emergency stop depends only on Jetson.
+
+Stage 01 "실물 구성 확정"
+"펌웨어·SDK·센서 접근 권한 확인"
+"팔·하우징 치수 / 질량 / 장착 좌표 확보"
+"산출물: 장비 목록·좌표계·버전표"
+
+Stage 02 "물리 모델 보정"
+"STEP 하우징 + A2 + PiPER-X 모델 통합"
+"무게중심·관성·충돌·관절 한계 반영"
+"통과 기준: 접힘·정지·보행·팔 간섭 검사"
+small amber "GLB 외형 ≠ 물리 모델 / 시각 팔 ≠ 실물 제어"
+
+Stage 03 "제어 경계 분리"
+"상위 행동 → 제한된 이동·작업 명령"
+"A2 내장 보행기와 팔 전용 제어기 사용"
+"금지: 시뮬레이터 관절 토크의 무검증 전송"
+
+Stage 04 "Jetson 패키징"
+"호환 JetPack·드라이버·SDK 고정"
+"인식 모델 최적화 / 워밍업 / 서비스 구성"
+"설정·로그·버전·롤백 묶음 준비"
+small "배포 스크립트 ≠ SDK 연동 완료"
+
+Stage 05 "센서 연결 · Shadow"
+"시간 동기화·외부 파라미터·최신 데이터"
+"실제 센서로 판단만 실행 / 구동 명령 차단"
+"통과 기준: 오검출·누락·데이터 지연 확인"
+
+Stage 06 "제한된 실물 구동"
+"통제 구역·감독자·즉시 수동 개입"
+"정지·저속 직진·회전 → 고정 장애물"
+"팔은 접힌 상태부터 / SDK 모드 전환 검증"
+
+Stage 07 "통합 환경 시험"
+"이동 장애물·협로·후방 접근·경로점"
+"정지 후 팔 작업 / 몸체·장비 간섭 검사"
+"센서 단절·GPU 과부하·통신 장애 시험"
+small "실패 시 이전 단계로 복귀"
+
+Stage 08 "현장 승인 · 운영"
+"반응 지연 P95/P99·최악값 측정"
+"도착률·충돌·정지거리·온도·복구 평가"
+"승인 버전 고정 / 제한 운용 / 로그·롤백"
+
+Bottom heading "출동 전 필수 확인"
+"센서 취득 → 판단 → 명령 → 실제 몸체 반응까지 측정"
+"안전거리 = 지연 중 이동거리 + 실측 제동거리 + 여유"
+"속도·가속·명령 유효시간 제한 / 오래된 입력은 안전 상태로"
+"커넥톰·AI가 멈춰도 안전 기능은 유지"
+Footer "절차 제안 · 실물 성능 보장 아님 | 2026-09-29"
+
+Do not add fabricated performance claims, certification, numerical latency guarantees or autonomous deployment commands. Every stage visualized as a checkpoint with arrows following 01 through08.

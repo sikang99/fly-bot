@@ -9,6 +9,7 @@ import { actorShape, actorHeading } from './dynamic.js';
 import { gamepadCommand, webManualCommand } from './manual.js';
 import { buildJetsonBox, buildBodyBranding, renderBeacon, EquipmentBeacon } from './equipment.js';
 import './style.css';
+import { installMorphologyPanel } from './morphology.js';
 
 const BASE = import.meta.env.BASE_URL;
 const $ = selector => document.querySelector(selector);
@@ -80,6 +81,35 @@ const floor = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshStan
 floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
 const grid = new THREE.GridHelper(20, 40, '#557086', '#344451'); grid.position.y = 0.002; scene.add(grid);
 const robot = new THREE.Group(); robot.rotation.x = -Math.PI / 2; scene.add(robot);
+const modelPreviewButton = document.createElement('button');
+modelPreviewButton.textContent = '3D 모델'; modelPreviewButton.disabled = true;
+modelPreviewButton.setAttribute('aria-expanded', 'false');
+modelPreviewButton.setAttribute('aria-controls', 'modelPreview');
+document.querySelector('.topbar nav').insertBefore(modelPreviewButton, $('#editorStop'));
+installMorphologyPanel(modelPreviewButton);
+let previewGeneration = 0, closeModelPreview;
+function setModelPreviewOpen(open) {
+  modelPreviewButton.setAttribute('aria-expanded', String(open));
+  modelPreviewButton.classList.toggle('active', open);
+}
+modelPreviewButton.onclick = async () => {
+  const generation = ++previewGeneration;
+  if (modelPreviewButton.getAttribute('aria-expanded') === 'true') {
+    setModelPreviewOpen(false); closeModelPreview?.(); closeModelPreview = undefined; return;
+  }
+  setModelPreviewOpen(true);
+  try {
+    const { showModelPreview } = await import('./model-preview.js');
+    if (generation !== previewGeneration) return;
+    await showModelPreview(robot, close => { closeModelPreview = close; }, () => {
+      if (generation !== previewGeneration) return;
+      setModelPreviewOpen(false); closeModelPreview = undefined;
+    });
+  } catch (error) {
+    if (generation === previewGeneration) setModelPreviewOpen(false);
+    console.error('3D model preview failed', error);
+  }
+};
 const jetson = buildJetsonBox();
 const equipmentBeacon = new EquipmentBeacon();
 const brandCanvas = document.createElement('canvas');
@@ -270,6 +300,7 @@ worker.onmessage = ({ data }) => {
     }
     ready = true; $('#status').textContent = 'READY'; $('#status').className = 'ok'; worker.postMessage({ type: 'run' });
   } else if (data.type === 'pose') {
+    modelPreviewButton.disabled = false;
     lastPose = data;
     const armPose = data.armWork?.pose || armWorkPose();
     const arm = bodyGroups.get('base_link')?.getObjectByName('single_arm');
